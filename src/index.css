@@ -1,0 +1,167 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+.print-only-report {
+  display: none;
+}
+
+body, input, button, select, textarea {
+  font-family: 'Outfit', sans-serif;
+  background: #f0f4f0;
+  color: #1a1a1a;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #a8d5a2;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #166534;
+}
+
+@media print {
+  body, html {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* When printing full A4 reports */
+  body.is-full-print {
+    background: white !important;
+  }
+  body.is-full-print * {
+    visibility: visible;
+  }
+  body.is-full-print aside {
+    display: none !important; /* Hide sidebar */
+  }
+  body.is-full-print #root, 
+  body.is-full-print #root > div, 
+  body.is-full-print main, 
+  body.is-full-print main > div {
+    height: auto !important;
+    overflow: visible !important;
+    display: block !important;
+    flex: none !important;
+    background: white !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  body.is-full-print .print-only-report {
+    display: block !important;
+  }
+  body.is-full-print .no-print-area {
+    display: none !important;
+  }
+
+  /* When printing receipts (default behavior) */
+  body:not(.is-full-print) * {
+    visibility: hidden;
+  }
+  body:not(.is-full-print) .print-invoice-wrapper, 
+  body:not(.is-full-print) .print-invoice-wrapper *,
+  body:not(.is-full-print) .print-full-width, 
+  body:not(.is-full-print) .print-full-width * {
+    visibility: visible;
+  }
+
+  .print-invoice-wrapper {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 80mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
+  }
+}
+
+@media screen {
+  .print-invoice-wrapper {
+    display: none !important;
+  }
+}
+
+/* Hide number input arrows globally */
+input[type=number]::-webkit-inner-spin-button, 
+input[type=number]::-webkit-outer-spin-button { 
+  -webkit-appearance: none; 
+  margin: 0; 
+}
+input[type=number] {
+  -moz-appearance: textfield;
+}
+
+.modern-button {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.modern-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+.modern-button:active {
+  transform: translateY(1px);
+  filter: brightness(0.95);
+}
+
+.modern-input {
+  transition: all 0.2s ease-in-out !important;
+}
+.modern-input:focus {
+  border-color: #10b981 !important;
+  background: #ffffff !important;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.3) !important;
+}
+
+.table-header-padding {
+  padding: 0;
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+input:focus, select:focus { outline: none !important; border-color: #10b981 !important; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.3) !important; }
+
+/* Custom Date Input Overrides */
+.custom-date-input::-webkit-datetime-edit,
+.custom-date-input::-webkit-datetime-edit-fields-wrapper,
+.custom-date-input::-webkit-datetime-edit-text,
+.custom-date-input::-webkit-datetime-edit-month-field,
+.custom-date-input::-webkit-datetime-edit-day-field,
+.custom-date-input::-webkit-datetime-edit-year-field {
+    color: transparent !important;
+    background: transparent !important;
+}
+
+.custom-date-input::selection {
+    background: transparent !important;
+    color: transparent !important;
+}

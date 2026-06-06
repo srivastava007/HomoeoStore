@@ -1,0 +1,189 @@
+/* Wholesale Billing Styles - Glassmorphism & Dense Layout */
+.wb-container {
+    font-family: 'Outfit', 'Inter', sans-serif;
+    height: 100%;
+    box-sizing: border-box;
+}
+
+/* Toast */
+.wb-toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+    z-index: 9999;
+    font-weight: 600;
+}
+.wb-toast.success { background: #10b981; }
+.wb-toast.error { background: #ef4444; }
+
+/* View Toggle Buttons */
+.wb-view-toggle {
+    display: flex;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(8px);
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.4);
+}
+
+.wb-view-btn {
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.2s;
+    background: transparent;
+    color: #64748b;
+}
+
+.wb-view-btn.active {
+    background: #0f2d1f;
+    color: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+/* Panels */
+.wb-panel {
+    background: rgba(255, 255, 255, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+    overflow: visible;
+    margin-bottom: 8px;
+}
+
+.wb-panel.green-border {
+    background: rgba(236, 253, 245, 0.75);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+/* Table */
+.wb-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+.wb-table th {
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #475569;
+    background: rgba(248, 250, 252, 0.6);
+    border-bottom: 1px solid rgba(226, 232, 240, 0.6);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.wb-table td {
+    padding: 6px 12px;
+    font-size: 12px;
+    color: #0f172a;
+    border-bottom: 1px solid rgba(241, 245, 249, 0.6);
+}
+
+.wb-table tr:hover {
+    background: rgba(241, 245, 249, 0.8);
+}
+
+/* Inputs & Labels */
+.wb-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    color: #475569;
+    margin-bottom: 2px;
+    text-transform: uppercase;
+}
+
+.wb-input, .modern-input {
+    width: 100%;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(203, 213, 225, 0.8);
+    background: rgba(255, 255, 255, 0.9);
+    font-size: 12px;
+    font-family: 'Outfit', 'Inter', sans-serif;
+    color: #1e293b;
+    outline: none;
+    box-sizing: border-box;
+    transition: all 0.2s ease;
+}
+
+.wb-input:focus, .modern-input:focus {
+    border-color: #3b82f6;
+    background: #ffffff;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.wb-input.readonly, .modern-input.readonly {
+    background: rgba(248, 250, 252, 0.6);
+    color: #64748b;
+    border-color: rgba(226, 232, 240, 0.6);
+    cursor: default;
+}
+
+.wb-btn-primary {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: #fff;
+    border: none;
+    padding: 6px 16px;
+    border-radius: 6px;
+    font-weight: 700;
+    cursor: pointer;
+    font-size: 12px;
+    height: 28px;
+    box-shadow: 0 2px 4px rgba(16, 185, 129, 0.2);
+    transition: all 0.2s;
+}
+.wb-btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
+}
+
+.wb-btn-danger {
+    background: rgba(254, 226, 226, 0.8);
+    color: #ef4444;
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.wb-btn-danger:hover {
+    background: #fecaca;
+}
+
+/* Modal */
+.wb-modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: rgba(15, 23, 42, 0.4);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.wb-modal-content {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(16px);
+    width: 360px;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid rgba(255,255,255,0.6);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}

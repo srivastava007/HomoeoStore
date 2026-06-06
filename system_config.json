@@ -1,0 +1,11 @@
+{
+  "financialYears": [
+    {
+      "id": "2024-2025",
+      "dbName": "homoeostore.db",
+      "name": "FY 2024 - 2025",
+      "startDate": "2024-04-01",
+      "endDate": "2025-03-31"
+    }
+  ]
+}
