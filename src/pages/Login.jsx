@@ -62,6 +62,28 @@ export default function Login({ onLogin }) {
     checkSetup()
   }, [])
 
+  // Auto-submit when PIN length is sufficient
+  useEffect(() => {
+    async function autoSubmit() {
+      if (!isPinSetup && pin.length >= 4 && role) {
+        if (role === 'admin') {
+          const res = await window.api.verifyAdminPin(pin)
+          if (res.success) {
+            onLogin('admin')
+          }
+        } else {
+          const res = await window.api.verifyCashierPin(pin)
+          if (res.success) {
+            onLogin('cashier')
+          }
+        }
+      } else if (pin.length < 4) {
+        setError('')
+      }
+    }
+    autoSubmit()
+  }, [pin, role, isPinSetup, onLogin])
+
   const handleModeChange = (newMode) => {
     window.api.setNetworkMode(newMode);
     setTimeout(() => {
