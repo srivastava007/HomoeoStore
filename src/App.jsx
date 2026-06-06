@@ -149,7 +149,6 @@ export default function App() {
 
   useEffect(() => {
     if (window.api) {
-      // console.log('[Cache] Initializing database cache on startup...');
       initializeCache();
     }
   }, [initializeCache]);
@@ -218,7 +217,6 @@ export default function App() {
     }
 
     if (shouldRefresh) {
-      // console.log(`[Cache] Re-initializing cache due to network shift (Mode: ${prevMode} -> ${netStatus.mode}, IP: ${prevIp} -> ${netStatus.ip})`);
       initializeCache();
       setPrevMode(netStatus.mode);
       setPrevIp(netStatus.ip);
