@@ -140,10 +140,10 @@ function runMigrations(database) {
   
   addCol('wholesale_bill_items', 'hsn_code', 'TEXT')
   
-  addCol('store_profile', 'bank_name', 'TEXT')
-  addCol('store_profile', 'account_number', 'TEXT')
-  addCol('store_profile', 'ifsc_code', 'TEXT')
-  addCol('store_profile', 'qr_code', 'TEXT')
+  addCol('master.store_profile', 'bank_name', 'TEXT')
+  addCol('master.store_profile', 'account_number', 'TEXT')
+  addCol('master.store_profile', 'ifsc_code', 'TEXT')
+  addCol('master.store_profile', 'qr_code', 'TEXT')
   addCol('ledgers', 'status', "TEXT DEFAULT 'ACTIVE'")
 
   // Create settings table if not exists
