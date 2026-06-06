@@ -6,7 +6,8 @@ const EMPTY_LEDGER = {
   opening_balance: 0, dr_cr: 'Dr', mail_to: '', address: '', pin_code: '', email: '',
   website: '', contact_person: '', designation: '', phone_office: '', phone_res: '',
   mobile: '', fax: '', dl_no: '', dl_expiry: '', gst_heading: 'Local', gstin: '',
-  pan_no: '', ledger_category: 'OTHERS', state: '', country: 'INDIA', ledger_type: 'REGISTERED'
+  pan_no: '', ledger_category: 'OTHERS', state: '', country: 'INDIA', ledger_type: 'REGISTERED',
+  status: 'ACTIVE'
 }
 
 function Drawer({ title, isOpen, onClose, children }) {
@@ -74,6 +75,7 @@ function StatCard({ title, value, icon, color }) {
 
 export default function PartyMaintenance() {
   const [ledgers, setLedgers] = useState([])
+  const [purchaseBills, setPurchaseBills] = useState([])
   const [search, setSearch] = useState('')
   const [filterType, setFilterType] = useState('ALL')
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
@@ -90,12 +92,36 @@ export default function PartyMaintenance() {
   async function load() {
     const data = await window.api.getLedgers()
     setLedgers(data)
+    try {
+      const pbs = await window.api.getPurchaseBills()
+      setPurchaseBills(pbs || [])
+    } catch(e) {
+      console.error('Failed to fetch purchase bills:', e)
+    }
   }
 
   useEffect(() => { load() }, [])
 
-  function openAdd() { setForm(EMPTY_LEDGER); setEditing(null); setIsDrawerOpen(true) }
-  function openEdit(l) { setForm(l); setEditing(l.id); setIsDrawerOpen(true) }
+  function openAdd() { 
+    let defaultGroup = 'SUNDRY DEBTORS'
+    if (filterType === 'CREDITORS') defaultGroup = 'SUNDRY CREDITORS'
+    setForm({ 
+      ...EMPTY_LEDGER, 
+      account_group: defaultGroup,
+      status: 'ACTIVE'
+    })
+    setEditing(null)
+    setIsDrawerOpen(true) 
+  }
+  
+  function openEdit(l) { 
+    setForm({
+      ...EMPTY_LEDGER,
+      ...l
+    })
+    setEditing(l.id)
+    setIsDrawerOpen(true) 
+  }
 
   async function handleSave(e) {
     e.preventDefault()
@@ -132,7 +158,10 @@ export default function PartyMaintenance() {
   }
 
   const filtered = ledgers.filter(l => {
-    const matchSearch = l.ledger_name.toLowerCase().includes(search.toLowerCase()) || (l.mobile && l.mobile.includes(search))
+    const matchSearch = l.ledger_name.toLowerCase().includes(search.toLowerCase()) || 
+                        (l.mobile && l.mobile.includes(search)) || 
+                        (l.station && l.station.toLowerCase().includes(search.toLowerCase())) ||
+                        (l.ledger_category && l.ledger_category.toLowerCase().includes(search.toLowerCase()))
     
     let matchFilter = false
     if (filterType === 'ALL') matchFilter = true
@@ -144,44 +173,118 @@ export default function PartyMaintenance() {
     return matchSearch && matchFilter
   })
 
+  // General counts
   const debtorsCount = ledgers.filter(l => l.account_group === 'SUNDRY DEBTORS').length
   const creditorsCount = ledgers.filter(l => l.account_group === 'SUNDRY CREDITORS').length
-  const banksCount = ledgers.filter(l => l.account_group === 'BANK ACCOUNTS').length
+  
+  // Creditor/Supplier specific stats
+  const suppliers = ledgers.filter(l => l.account_group === 'SUNDRY CREDITORS')
+  const totalSuppliersCount = suppliers.length
+  const activeSuppliersCount = suppliers.filter(s => (s.status || 'ACTIVE') === 'ACTIVE').length
+  const outstandingPayable = suppliers.reduce((sum, s) => s.current_balance_type === 'Cr' ? sum + s.current_balance : sum, 0)
+  
+  // Calculate recent deliveries (created today)
+  const todayStr = new Date().toLocaleDateString('en-CA') // Local YYYY-MM-DD
+  const recentDeliveriesTodayCount = purchaseBills.filter(pb => pb.created_at && pb.created_at.startsWith(todayStr)).length
+
+  // Debtor/Customer specific stats
+  const customers = ledgers.filter(l => l.account_group === 'SUNDRY DEBTORS')
+  const totalCustomersCount = customers.length
+  const activeCustomersCount = customers.filter(c => (c.status || 'ACTIVE') === 'ACTIVE').length
+  const outstandingReceivable = customers.reduce((sum, c) => c.current_balance_type === 'Dr' ? sum + c.current_balance : sum, 0)
 
   const handleChange = (e) => setForm(f => ({ ...f, [e.target.name]: e.target.value }))
+
+  const thStyle = {
+    padding: '16px 24px', 
+    color: '#64748b', 
+    fontWeight: '700', 
+    fontSize: '12px', 
+    textTransform: 'uppercase', 
+    letterSpacing: '0.5px'
+  }
+
+  // Dynamic values based on active tab
+  const getHeaderInfo = () => {
+    if (filterType === 'CREDITORS') {
+      return {
+        title: 'Supplier Management',
+        subtitle: 'Create and manage wholesale distributors and supply agencies',
+        btnText: '+ Add New Supplier',
+        showBadge: true
+      }
+    } else if (filterType === 'DEBTORS') {
+      return {
+        title: 'Customer Management',
+        subtitle: 'Create and manage customer accounts and retail buyers',
+        btnText: '+ Add New Customer',
+        showBadge: false
+      }
+    }
+    return {
+      title: 'Party / Account Maintenance',
+      subtitle: 'Create and manage all party accounts and financial ledgers',
+      btnText: '+ New Account',
+      showBadge: false
+    }
+  }
+
+  const header = getHeaderInfo()
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', height: '100%', fontFamily: 'Outfit, sans-serif' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <h1 style={{ fontSize: '28px', fontWeight: '800', color: '#0f2d1f', margin: '0 0 4px 0', letterSpacing: '-0.5px' }}>Party / Account Maintenance</h1>
-          <p style={{ fontSize: '14px', color: '#64748b', margin: 0 }}>Create and manage all party accounts and financial ledgers</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <h1 style={{ fontSize: '28px', fontWeight: '800', color: '#0f2d1f', margin: '0 0 4px 0', letterSpacing: '-0.5px' }}>{header.title}</h1>
+            {header.showBadge && (
+              <span style={{ fontSize: '11px', fontWeight: '800', background: '#dcfce7', color: '#15803d', padding: '4px 12px', borderRadius: '20px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Active Module
+              </span>
+            )}
+          </div>
+          <p style={{ fontSize: '14px', color: '#64748b', margin: 0 }}>{header.subtitle}</p>
         </div>
         <button onClick={openAdd} style={{
           background: 'linear-gradient(135deg, #0f2d1f 0%, #153c29 100%)', color: '#fff', border: 'none', borderRadius: '10px',
-          padding: '12px 24px', fontSize: '14px', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '8px',
+          padding: '12px 24px', fontSize: '14px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px',
           cursor: 'pointer', boxShadow: '0 4px 12px rgba(15, 45, 31, 0.2)', transition: 'all 0.2s'
         }}>
-          <span style={{ fontSize: '18px' }}>+</span> New Account
+          {header.btnText}
         </button>
       </div>
 
-      {/* Analytics */}
-      <div style={{ display: 'flex', gap: '20px' }}>
-        <StatCard title="Total Debtors (Customers)" value={debtorsCount} icon="👥" color="#3b82f6" />
-        <StatCard title="Total Creditors (Suppliers)" value={creditorsCount} icon="🏢" color="#f59e0b" />
-      </div>
+      {/* Dynamic Analytics Block */}
+      {filterType === 'CREDITORS' ? (
+        <div style={{ display: 'flex', gap: '20px' }}>
+          <StatCard title="Total Suppliers" value={totalSuppliersCount} icon="👥" color="#10b981" />
+          <StatCard title="Active Distributors" value={activeSuppliersCount} icon="📡" color="#3b82f6" />
+          <StatCard title="Outstanding Payable" value={'₹' + parseFloat(outstandingPayable).toLocaleString('en-IN', { maximumFractionDigits: 0 })} icon="💵" color="#ef4444" />
+          <StatCard title="Recent Deliveries" value={recentDeliveriesTodayCount + ' Today'} icon="⏱️" color="#f59e0b" />
+        </div>
+      ) : filterType === 'DEBTORS' ? (
+        <div style={{ display: 'flex', gap: '20px' }}>
+          <StatCard title="Total Customers" value={totalCustomersCount} icon="👥" color="#3b82f6" />
+          <StatCard title="Active Customers" value={activeCustomersCount} icon="✅" color="#10b981" />
+          <StatCard title="Outstanding Receivable" value={'₹' + parseFloat(outstandingReceivable).toLocaleString('en-IN', { maximumFractionDigits: 0 })} icon="💰" color="#f59e0b" />
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: '20px' }}>
+          <StatCard title="Total Debtors (Customers)" value={debtorsCount} icon="👥" color="#3b82f6" />
+          <StatCard title="Total Creditors (Suppliers)" value={creditorsCount} icon="🏢" color="#f59e0b" />
+        </div>
+      )}
 
       {/* Main Content Area */}
       <div style={{ background: '#fff', borderRadius: '16px', boxShadow: '0 4px 20px rgba(0,0,0,0.03)', border: '1px solid #e2e8f0', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         
         {/* Toolbar */}
         <div style={{ padding: '20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
-          <div style={{ position: 'relative', width: '320px' }}>
+          <div style={{ position: 'relative', width: '360px' }}>
             <span style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }}>🔍</span>
             <input
-              placeholder="Search by name or mobile..."
+              placeholder={filterType === 'CREDITORS' ? "Filter by Supplier City or Category name..." : "Search by name, mobile, or city..."}
               value={search} onChange={e => setSearch(e.target.value)}
               style={{ ...inputStyle, paddingLeft: '40px', background: '#fff' }}
             />
@@ -189,14 +292,14 @@ export default function PartyMaintenance() {
           
           <div style={{ display: 'flex', gap: '8px', background: '#e2e8f0', padding: '4px', borderRadius: '10px' }}>
             {['ALL', 'DEBTORS', 'CREDITORS', 'CASH/BANK', 'OTHERS'].map(type => (
-              <button key={type} onClick={() => setFilterType(type)} style={{
-                padding: '8px 16px', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '600', cursor: 'pointer',
+              <button key={type} onClick={() => { setFilterType(type); setSearch(''); }} style={{
+                padding: '8px 16px', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: '700', cursor: 'pointer',
                 background: filterType === type ? '#fff' : 'transparent',
                 color: filterType === type ? '#0f2d1f' : '#64748b',
                 boxShadow: filterType === type ? '0 2px 4px rgba(0,0,0,0.05)' : 'none',
                 transition: 'all 0.2s'
               }}>
-                {type}
+                {type === 'CREDITORS' ? 'SUPPLIERS' : type === 'DEBTORS' ? 'CUSTOMERS' : type}
               </button>
             ))}
           </div>
@@ -206,62 +309,136 @@ export default function PartyMaintenance() {
         <div style={{ overflowY: 'auto', flex: 1 }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
             <thead style={{ position: 'sticky', top: 0, background: '#fff', zIndex: 1, boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
-              <tr style={{ textAlign: 'left' }}>
-                <th style={{ padding: '16px 24px', color: '#64748b', fontWeight: '600', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Ledger Details</th>
-                <th style={{ padding: '16px 24px', color: '#64748b', fontWeight: '600', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Contact</th>
-                <th style={{ padding: '16px 24px', color: '#64748b', fontWeight: '600', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'right' }}>Opening Balance</th>
-                <th style={{ padding: '16px 24px', color: '#64748b', fontWeight: '600', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'right' }}>Current Balance</th>
-                <th style={{ padding: '16px 24px', color: '#64748b', fontWeight: '600', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'right' }}>Actions</th>
-              </tr>
+              {filterType === 'CREDITORS' ? (
+                <tr style={{ textAlign: 'left' }}>
+                  <th style={thStyle}>Supplier Name</th>
+                  <th style={thStyle}>Contact Person</th>
+                  <th style={thStyle}>Phone Number</th>
+                  <th style={thStyle}>DL Number</th>
+                  <th style={thStyle}>City</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Balance (Payable)</th>
+                  <th style={thStyle}>Status</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Actions</th>
+                </tr>
+              ) : (
+                <tr style={{ textAlign: 'left' }}>
+                  <th style={thStyle}>Ledger Details</th>
+                  <th style={thStyle}>Contact</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Opening Balance</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Current Balance</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>Actions</th>
+                </tr>
+              )}
             </thead>
             <tbody>
-              {filtered.map(l => (
-                <tr key={l.id} style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.2s' }}>
-                  <td style={{ padding: '16px 24px' }}>
-                    <div style={{ fontWeight: '700', color: '#1e293b', fontSize: '15px' }}>{l.ledger_name}</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
-                      <span style={{ fontSize: '11px', background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: '4px', fontWeight: '600' }}>{l.account_group}</span>
-                      {l.station && <span style={{ fontSize: '12px', color: '#94a3b8' }}>📍 {l.station}</span>}
-                    </div>
-                  </td>
-                  <td style={{ padding: '16px 24px' }}>
-                    <div style={{ color: '#475569', fontSize: '13px' }}>{l.mobile || '—'}</div>
-                    {l.email && <div style={{ color: '#94a3b8', fontSize: '12px', marginTop: '2px' }}>{l.email}</div>}
-                  </td>
-                  <td style={{ padding: '16px 24px', textAlign: 'right' }}>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: '#64748b', fontSize: '13px', fontWeight: '600' }}>
-                      ₹ {parseFloat(l.opening_balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                      <span style={{ fontSize: '11px', opacity: 0.8 }}>{l.dr_cr}</span>
-                    </div>
-                  </td>
-                  <td style={{ padding: '16px 24px', textAlign: 'right' }}>
-                    <div style={{ 
-                      display: 'inline-flex', alignItems: 'center', gap: '6px', 
-                      background: l.current_balance_type === 'Dr' ? '#fef2f2' : '#f0fdf4',
-                      color: l.current_balance_type === 'Dr' ? '#ef4444' : '#22c55e',
-                      padding: '6px 12px', borderRadius: '8px', fontWeight: '700', fontSize: '14px'
-                    }}>
-                      ₹ {parseFloat(l.current_balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                      <span style={{ fontSize: '11px', opacity: 0.8 }}>{l.current_balance_type}</span>
-                    </div>
-                  </td>
-                  <td style={{ padding: '16px 24px', textAlign: 'right' }}>
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                      {!['CASH', 'Purchase Account', 'Sales Account'].includes(l.ledger_name) && (
-                        <button onClick={() => openEdit(l)} style={{ padding: '6px 12px', fontSize: '13px', cursor: 'pointer', background: '#eff6ff', color: '#3b82f6', border: 'none', borderRadius: '6px', fontWeight: '600', transition: 'all 0.2s' }}>Edit</button>
-                      )}
-                      {l.is_deletable && (
-                        <button onClick={() => handleDelete(l.id)} style={{ padding: '6px 12px', fontSize: '13px', cursor: 'pointer', background: '#fef2f2', color: '#ef4444', border: 'none', borderRadius: '6px', fontWeight: '600', transition: 'all 0.2s' }}>Delete</button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {filtered.map(l => {
+                if (filterType === 'CREDITORS') {
+                  const balColor = l.current_balance_type === 'Dr' ? '#22c55e' : '#ef4444'
+                  const balBg = l.current_balance_type === 'Dr' ? '#f0fdf4' : '#fef2f2'
+                  return (
+                    <tr key={l.id} style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.2s' }}>
+                      <td style={{ padding: '16px 24px' }}>
+                        <div style={{ fontWeight: '700', color: '#0f2d1f', fontSize: '15px' }}>{l.ledger_name}</div>
+                        <div style={{ fontSize: '11px', background: '#f1f5f9', color: '#475569', padding: '2px 8px', borderRadius: '4px', fontWeight: '700', display: 'inline-block', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          {l.ledger_category || 'GENERAL'}
+                        </div>
+                      </td>
+                      <td style={{ padding: '16px 24px', color: '#475569', fontWeight: '500' }}>{l.contact_person || '—'}</td>
+                      <td style={{ padding: '16px 24px', color: '#475569' }}>{l.mobile || '—'}</td>
+                      <td style={{ padding: '16px 24px', color: '#475569', fontFamily: 'monospace', fontSize: '13px' }}>{l.dl_no || '—'}</td>
+                      <td style={{ padding: '16px 24px', color: '#475569' }}>{l.station || '—'}</td>
+                      <td style={{ padding: '16px 24px', textAlign: 'right' }}>
+                        <div style={{ 
+                          display: 'inline-flex', alignItems: 'center', gap: '6px', 
+                          background: balBg, color: balColor,
+                          padding: '6px 12px', borderRadius: '8px', fontWeight: '800', fontSize: '14px'
+                        }}>
+                          ₹ {parseFloat(l.current_balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          <span style={{ fontSize: '11px', opacity: 0.8 }}>{l.current_balance_type}</span>
+                        </div>
+                      </td>
+                      <td style={{ padding: '16px 24px' }}>
+                        <span style={{ 
+                          background: (l.status || 'ACTIVE') === 'ACTIVE' ? '#dcfce7' : '#fee2e2', 
+                          color: (l.status || 'ACTIVE') === 'ACTIVE' ? '#15803d' : '#ef4444', 
+                          padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '800',
+                          border: `1px solid ${(l.status || 'ACTIVE') === 'ACTIVE' ? '#bbf7d0' : '#fecaca'}`,
+                          textTransform: 'uppercase', letterSpacing: '0.5px'
+                        }}>
+                          {l.status || 'ACTIVE'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '16px 24px', textAlign: 'right' }}>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                          <button onClick={() => openEdit(l)} style={{ padding: '6px 12px', fontSize: '13px', cursor: 'pointer', background: '#eff6ff', color: '#3b82f6', border: 'none', borderRadius: '6px', fontWeight: '600', transition: 'all 0.2s' }}>Edit</button>
+                          {l.is_deletable && (
+                            <button onClick={() => handleDelete(l.id)} style={{ padding: '6px 12px', fontSize: '13px', cursor: 'pointer', background: '#fef2f2', color: '#ef4444', border: 'none', borderRadius: '6px', fontWeight: '600', transition: 'all 0.2s' }}>Delete</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                } else {
+                  return (
+                    <tr key={l.id} style={{ borderBottom: '1px solid #f1f5f9', transition: 'background 0.2s' }}>
+                      <td style={{ padding: '16px 24px' }}>
+                        <div style={{ fontWeight: '700', color: '#1e293b', fontSize: '15px' }}>{l.ledger_name}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                          <span style={{ fontSize: '11px', background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: '4px', fontWeight: '600' }}>{l.account_group}</span>
+                          {l.station && <span style={{ fontSize: '12px', color: '#94a3b8' }}>📍 {l.station}</span>}
+                          <span style={{ 
+                            fontSize: '10px', 
+                            background: (l.status || 'ACTIVE') === 'ACTIVE' ? '#e8f5e9' : '#f1f5f9', 
+                            color: (l.status || 'ACTIVE') === 'ACTIVE' ? '#15803d' : '#64748b', 
+                            padding: '1px 6px', 
+                            borderRadius: '4px', 
+                            fontWeight: '700',
+                            border: `1px solid ${(l.status || 'ACTIVE') === 'ACTIVE' ? '#bbf7d0' : '#e2e8f0'}`,
+                          }}>
+                            {l.status || 'ACTIVE'}
+                          </span>
+                        </div>
+                      </td>
+                      <td style={{ padding: '16px 24px' }}>
+                        <div style={{ color: '#475569', fontSize: '13px' }}>{l.mobile || '—'}</div>
+                        {l.email && <div style={{ color: '#94a3b8', fontSize: '12px', marginTop: '2px' }}>{l.email}</div>}
+                      </td>
+                      <td style={{ padding: '16px 24px', textAlign: 'right' }}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: '#64748b', fontSize: '13px', fontWeight: '600' }}>
+                          ₹ {parseFloat(l.opening_balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          <span style={{ fontSize: '11px', opacity: 0.8 }}>{l.dr_cr}</span>
+                        </div>
+                      </td>
+                      <td style={{ padding: '16px 24px', textAlign: 'right' }}>
+                        <div style={{ 
+                          display: 'inline-flex', alignItems: 'center', gap: '6px', 
+                          background: l.current_balance_type === 'Dr' ? '#fef2f2' : '#f0fdf4',
+                          color: l.current_balance_type === 'Dr' ? '#ef4444' : '#22c55e',
+                          padding: '6px 12px', borderRadius: '8px', fontWeight: '700', fontSize: '14px'
+                        }}>
+                          ₹ {parseFloat(l.current_balance || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          <span style={{ fontSize: '11px', opacity: 0.8 }}>{l.current_balance_type}</span>
+                        </div>
+                      </td>
+                      <td style={{ padding: '16px 24px', textAlign: 'right' }}>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                          {!['CASH', 'Purchase Account', 'Sales Account'].includes(l.ledger_name) && (
+                            <button onClick={() => openEdit(l)} style={{ padding: '6px 12px', fontSize: '13px', cursor: 'pointer', background: '#eff6ff', color: '#3b82f6', border: 'none', borderRadius: '6px', fontWeight: '600', transition: 'all 0.2s' }}>Edit</button>
+                          )}
+                          {l.is_deletable && (
+                            <button onClick={() => handleDelete(l.id)} style={{ padding: '6px 12px', fontSize: '13px', cursor: 'pointer', background: '#fef2f2', color: '#ef4444', border: 'none', borderRadius: '6px', fontWeight: '600', transition: 'all 0.2s' }}>Delete</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }
+              })}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={4} style={{ padding: '48px', textAlign: 'center', color: '#94a3b8' }}>
+                  <td colSpan={filterType === 'CREDITORS' ? 8 : 5} style={{ padding: '48px', textAlign: 'center', color: '#94a3b8' }}>
                     <div style={{ fontSize: '48px', marginBottom: '12px' }}>📭</div>
-                    <div style={{ fontSize: '16px', fontWeight: '600', color: '#475569' }}>No ledgers found</div>
+                    <div style={{ fontSize: '16px', fontWeight: '600', color: '#475569' }}>No accounts found</div>
                     <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>Try adjusting your search or filters.</p>
                   </td>
                 </tr>
@@ -272,7 +449,7 @@ export default function PartyMaintenance() {
       </div>
 
       {/* Slide-out Drawer Form */}
-      <Drawer title={editing ? 'Edit Ledger' : 'Create New Ledger'} isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)}>
+      <Drawer title={editing ? 'Edit Account Ledger' : 'Create New Account Ledger'} isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)}>
         <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           
           {/* Section 1 */}
@@ -330,13 +507,19 @@ export default function PartyMaintenance() {
               <Field label="D.L. No."><input name="dl_no" value={form.dl_no} onChange={handleChange} style={inputStyle} placeholder="Drug License" /></Field>
               <Field label="Ledger Category">
                 <select name="ledger_category" value={form.ledger_category} onChange={handleChange} style={inputStyle}>
-                  <option>OTHERS</option><option>RETAILER</option><option>STOCKIST</option>
+                  <option>OTHERS</option><option>RETAILER</option><option>STOCKIST</option><option>OEM PARTNER</option><option>DISTRIBUTOR</option><option>SPECIALIST</option>
                 </select>
               </Field>
               <Field label="State"><input name="state" value={form.state} onChange={handleChange} style={inputStyle} placeholder="e.g. 07-DELHI" /></Field>
               <Field label="Ledger Type">
                 <select name="ledger_type" value={form.ledger_type} onChange={handleChange} style={inputStyle}>
                   <option>REGISTERED</option><option>UNREGISTERED</option><option>COMPOSITION</option>
+                </select>
+              </Field>
+              <Field label="Status">
+                <select name="status" value={form.status || 'ACTIVE'} onChange={handleChange} style={inputStyle}>
+                  <option value="ACTIVE">ACTIVE</option>
+                  <option value="INACTIVE">INACTIVE</option>
                 </select>
               </Field>
             </div>

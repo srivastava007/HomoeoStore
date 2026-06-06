@@ -128,6 +128,7 @@ function runMigrations(database) {
   addCol('store_profile', 'account_number', 'TEXT')
   addCol('store_profile', 'ifsc_code', 'TEXT')
   addCol('store_profile', 'qr_code', 'TEXT')
+  addCol('ledgers', 'status', "TEXT DEFAULT 'ACTIVE'")
 
   // Create settings table if not exists
   database.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
@@ -937,22 +938,24 @@ function getLedgers() {
 }
 
 function addLedger(data) {
+  const merged = { status: 'ACTIVE', ...data }
   return getDB().prepare(`
     INSERT INTO ledgers (
       ledger_name, station, account_group, balancing_method, opening_balance, dr_cr,
       mail_to, address, pin_code, email, website, contact_person, designation,
       phone_office, phone_res, mobile, fax, dl_no, dl_expiry, gst_heading, gstin, pan_no,
-      ledger_category, state, country, ledger_type
+      ledger_category, state, country, ledger_type, status
     ) VALUES (
       @ledger_name, @station, @account_group, @balancing_method, @opening_balance, @dr_cr,
       @mail_to, @address, @pin_code, @email, @website, @contact_person, @designation,
       @phone_office, @phone_res, @mobile, @fax, @dl_no, @dl_expiry, @gst_heading, @gstin, @pan_no,
-      @ledger_category, @state, @country, @ledger_type
+      @ledger_category, @state, @country, @ledger_type, @status
     )
-  `).run(data)
+  `).run(merged)
 }
 
 function updateLedger(data) {
+  const merged = { status: 'ACTIVE', ...data }
   const stmt = getDB().prepare(`
     UPDATE ledgers SET
       ledger_name=@ledger_name, station=@station, account_group=@account_group,
@@ -961,10 +964,10 @@ function updateLedger(data) {
       contact_person=@contact_person, designation=@designation, phone_office=@phone_office,
       phone_res=@phone_res, mobile=@mobile, fax=@fax, dl_no=@dl_no, dl_expiry=@dl_expiry,
       gst_heading=@gst_heading, gstin=@gstin, pan_no=@pan_no, ledger_category=@ledger_category,
-      state=@state, country=@country, ledger_type=@ledger_type
+      state=@state, country=@country, ledger_type=@ledger_type, status=@status
     WHERE id=@id
   `)
-  return stmt.run(data)
+  return stmt.run(merged)
 }
 
 function deleteLedger(id) {
@@ -1968,8 +1971,8 @@ function updateStoreProfile(data) {
       account_number = @account_number,
       ifsc_code = @ifsc_code,
       qr_code = @qr_code
-    WHERE id = ?
-  `).run(data, profile.id)
+    WHERE id = @id
+  `).run({ ...data, id: profile.id })
 }
 
 

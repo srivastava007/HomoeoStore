@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ledgers (
   state TEXT,
   country TEXT,
   ledger_type TEXT,
+  status TEXT DEFAULT 'ACTIVE',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
