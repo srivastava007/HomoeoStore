@@ -14,7 +14,14 @@ export default function Billing({ isYearLocked = false }) {
         refreshMedicines
     } = useCache()
 
-    console.log('[RetailBilling] Cached Companies:', companies);
+    useEffect(() => {
+        if (window.api && window.api.logRendererEvent) {
+            window.api.logRendererEvent('info', `[RetailBilling] Companies loaded in component. Count: ${companies ? companies.length : 0}`);
+            if (companies && companies.length > 0) {
+                window.api.logRendererEvent('info', `[RetailBilling] First 3 companies: ${JSON.stringify(companies.slice(0, 3).map(c => c.name))}`);
+            }
+        }
+    }, [companies]);
 
     const [bills, setBills] = useState([])
     const [items, setItems] = useState([])
