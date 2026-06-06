@@ -81,6 +81,22 @@ function selectFinancialYear(dbName) {
     db = null
   }
   currentDbName = dbName
+  
+  // Persist the selected year in the master settings database
+  const MASTER_PATH = path.join(app.getPath('userData'), 'homoeostore_master.db')
+  let tempMasterDb = null;
+  try {
+    tempMasterDb = new Database(MASTER_PATH);
+    tempMasterDb.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+    tempMasterDb.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('selected_fy', ?)").run(dbName);
+    console.log(`[Database] Persisted selected FY in master settings: ${dbName}`);
+  } catch (e) {
+    console.error('Failed to persist selected_fy in master database:', e);
+  } finally {
+    if (tempMasterDb) {
+      try { tempMasterDb.close(); } catch(e) {}
+    }
+  }
   return true
 }
 
@@ -443,8 +459,29 @@ function runMigrations(database) {
 
 function getDB() {
   if (!db) {
-    const DB_PATH = path.join(app.getPath('userData'), currentDbName)
     const MASTER_PATH = path.join(app.getPath('userData'), 'homoeostore_master.db')
+    
+    // Pre-read last selected FY from master settings if it exists
+    if (fs.existsSync(MASTER_PATH)) {
+      let tempMasterDb = null;
+      try {
+        tempMasterDb = new Database(MASTER_PATH);
+        tempMasterDb.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
+        const row = tempMasterDb.prepare("SELECT value FROM settings WHERE key = 'selected_fy'").get();
+        if (row && row.value) {
+          currentDbName = row.value;
+          console.log(`[Database] Loaded last selected FY from master settings: ${currentDbName}`);
+        }
+      } catch (e) {
+        console.error('Failed to pre-read selected_fy from master database', e);
+      } finally {
+        if (tempMasterDb) {
+          try { tempMasterDb.close(); } catch(e) {}
+        }
+      }
+    }
+
+    const DB_PATH = path.join(app.getPath('userData'), currentDbName)
     
     // Self-healing check for master database file
     if (!fs.existsSync(MASTER_PATH)) {
