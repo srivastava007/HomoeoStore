@@ -6,6 +6,8 @@ export default function Login({ onLogin }) {
   const [error, setError] = useState('')
   const [isPinSetup, setIsPinSetup] = useState(false)
   const [setupStep, setSetupStep] = useState('ROLE_SELECT') // 'ROLE_SELECT', 'SET_PIN', 'SEARCHING_SERVER', 'SERVER_UNCONFIGURED'
+  const [adminPinLength, setAdminPinLength] = useState(4)
+  const [cashierPinLength, setCashierPinLength] = useState(4)
 
   const [netStatus, setNetStatus] = useState({ mode: 'LOCAL', ip: null, connected: true })
   const [showNetworkMenu, setShowNetworkMenu] = useState(false)
@@ -62,27 +64,60 @@ export default function Login({ onLogin }) {
     checkSetup()
   }, [])
 
-  // Auto-submit when PIN length is sufficient
+  // Fetch actual PIN lengths from database
   useEffect(() => {
+    async function loadPinLengths() {
+      if (!window.api) return;
+      try {
+        const profile = await window.api.getStoreProfile()
+        if (profile && profile.admin_pin) {
+          setAdminPinLength(profile.admin_pin.length)
+        }
+        const cashierPin = await window.api.getSetting('cashier_pin')
+        if (cashierPin) {
+          setCashierPinLength(cashierPin.length)
+        } else {
+          setCashierPinLength(4) // Default is '1234' (4 digits)
+        }
+      } catch (err) {
+        console.error('Failed to load PIN lengths:', err)
+      }
+    }
+    loadPinLengths()
+  }, [isPinSetup])
+
+  // Auto-submit when PIN length is exactly the configured length
+  useEffect(() => {
+    let active = true
     async function autoSubmit() {
-      if (!isPinSetup && pin.length >= 4 && role) {
+      const expectedLength = role === 'admin' ? adminPinLength : cashierPinLength
+      if (!isPinSetup && pin.length === expectedLength && role) {
         if (role === 'admin') {
           const res = await window.api.verifyAdminPin(pin)
-          if (res.success) {
+          if (active && res.success) {
             onLogin('admin')
+          } else if (active && !res.success) {
+            setError('Incorrect Admin PIN')
+            setPin('')
           }
         } else {
           const res = await window.api.verifyCashierPin(pin)
-          if (res.success) {
+          if (active && res.success) {
             onLogin('cashier')
+          } else if (active && !res.success) {
+            setError('Incorrect Cashier PIN')
+            setPin('')
           }
         }
-      } else if (pin.length < 4) {
+      } else if (pin.length < expectedLength) {
         setError('')
       }
     }
     autoSubmit()
-  }, [pin, role, isPinSetup, onLogin])
+    return () => {
+      active = false
+    }
+  }, [pin, role, isPinSetup, onLogin, adminPinLength, cashierPinLength])
 
   const handleModeChange = (newMode) => {
     window.api.setNetworkMode(newMode);
