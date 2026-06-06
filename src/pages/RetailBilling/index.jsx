@@ -6,7 +6,7 @@ import { useCache } from '../../context/CacheContext'
 export default function Billing({ isYearLocked = false }) {
     const {
         medicines,
-        companies: cachedComps,
+        companies,
         categories: types,
         powers,
         packings,
@@ -14,12 +14,7 @@ export default function Billing({ isYearLocked = false }) {
         refreshMedicines
     } = useCache()
 
-    const companies = useMemo(() => {
-        const dbCompanies = cachedComps || []
-        const medicineCompanies = (medicines || []).map(m => m.company).filter(Boolean)
-        const uniqueCompanyNames = Array.from(new Set([...dbCompanies.map(x => x.name), ...medicineCompanies]))
-        return uniqueCompanyNames.sort().map(name => ({ name }))
-    }, [cachedComps, medicines])
+    console.log('[RetailBilling] Cached Companies:', companies);
 
     const [bills, setBills] = useState([])
     const [items, setItems] = useState([])
