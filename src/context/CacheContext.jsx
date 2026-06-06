@@ -134,7 +134,7 @@ export function CacheProvider({ children }) {
   }, []);
 
   const logEvent = useCallback((msg) => {
-    console.log(msg);
+    // console.log(msg);
     if (window.api && window.api.logRendererEvent) {
       window.api.logRendererEvent('info', msg);
     }
