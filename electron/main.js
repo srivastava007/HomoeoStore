@@ -73,6 +73,20 @@ function createWindow() {
     if (!global.isQuitting) {
       event.preventDefault()
       mainWindow.hide()
+
+      // Perform backups when window hides (server keeps running)
+      try {
+        const backupPath = db.getSetting('backup_path')
+        if (backupPath) {
+          console.log('Starting auto-backup on window hide to:', backupPath)
+          db.performBackup(backupPath)
+          console.log('Local backup successful')
+        }
+      } catch (err) {
+        console.error('Local backup failed:', err)
+      }
+      
+      performCloudBackup().catch(err => console.error('Cloud backup failed:', err));
     }
   })
 }
@@ -81,6 +95,7 @@ function createWindow() {
 ipcMain.handle('get-financial-years', () => handleDb('getFinancialYears'))
 ipcMain.handle('select-financial-year', (_, dbName) => handleDb('selectFinancialYear', dbName))
 ipcMain.handle('create-financial-year', (_, data) => handleDb('createFinancialYear', data))
+ipcMain.handle('get-current-db-name', () => handleDb('getCurrentDbName'))
 
 app.commandLine.appendSwitch('lang', 'en-GB');
 
@@ -103,7 +118,6 @@ function updateTray() {
     { label: 'Show HomoeoStore', click: () => { if (mainWindow) mainWindow.show() } },
     { type: 'separator' },
     { label: quitLabel, click: () => { 
-        global.isQuitting = true; 
         app.quit(); 
       } 
     }
@@ -370,6 +384,9 @@ ipcMain.handle('update-stock', (_, data) => handleDb('updateStock', data))
 
 // Billing
 ipcMain.handle('create-bill', (_, data) => handleDb('createBill', data))
+ipcMain.handle('update-bill', (_, data) => handleDb('updateBill', data))
+ipcMain.handle('cancel-retail-bill', (_, data) => handleDb('cancelRetailBill', data))
+ipcMain.handle('delete-retail-bill', (_, id) => handleDb('deleteRetailBill', id))
 ipcMain.handle('get-bills', () => handleDb('getBills'))
 ipcMain.handle('get-bill-by-id', (_, id) => handleDb('getBillById', id))
 
@@ -397,6 +414,7 @@ ipcMain.handle('delete-ledger', (_, id) => handleDb('deleteLedger', id))
 ipcMain.handle('add-voucher', (_, data) => handleDb('addVoucher', data))
 ipcMain.handle('get-ledger-statement', (_, args) => handleDb('getLedgerStatement', args.ledger_id, args.fromDate, args.toDate))
 ipcMain.handle('get-day-book', (_, date) => handleDb('getDayBook', date))
+ipcMain.handle('get-recent-expenses', () => handleDb('getRecentExpenses'))
 
 // HSN/SAC
 ipcMain.handle('get-hsn-sac', () => handleDb('getHsnSac'))
@@ -446,6 +464,7 @@ ipcMain.handle('get-purchase-orders', () => handleDb('getPurchaseOrders'))
 
 // Reports & Alerts
 ipcMain.handle('get-sales-report', (_, range) => handleDb('getSalesReport', range))
+ipcMain.handle('get-monthly-item-sales', (_, options) => handleDb('getMonthlyItemSales', options))
 ipcMain.handle('get-gst-sales-register-paginated', (_, data) => handleDb('getGstSalesRegisterPaginated', data))
 ipcMain.handle('get-gst-purchase-register-paginated', (_, data) => handleDb('getGstPurchaseRegisterPaginated', data))
 ipcMain.handle('save-to-pdf', async (event, defaultName, dialogTitle, landscape, pageSize) => {
@@ -508,6 +527,8 @@ ipcMain.handle('search-wholesale-bills-paginated', (_, data) => handleDb('search
 ipcMain.handle('get-wholesale-bills', () => handleDb('getWholesaleBills'))
 ipcMain.handle('get-wholesale-bill-by-id', (_, id) => handleDb('getWholesaleBillById', id))
 ipcMain.handle('update-wholesale-bill', (_, data) => handleDb('updateWholesaleBill', data))
+ipcMain.handle('cancel-wholesale-bill', (_, data) => handleDb('cancelWholesaleBill', data))
+ipcMain.handle('delete-wholesale-bill', (_, id) => handleDb('deleteWholesaleBill', id))
 ipcMain.handle('get-next-wholesale-bill-number', () => handleDb('getNextWholesaleBillNumber'))
 
 // Issue Slips
@@ -1229,8 +1250,271 @@ ipcMain.handle('get-wholesale-returns', () => handleDb('getWholesaleReturns'))
 // Dashboard & Reports
 ipcMain.handle('get-dashboard-stats', () => handleDb('getDashboardStats'))
 ipcMain.handle('get-balance-sheet', () => handleDb('getBalanceSheetData'))
-ipcMain.handle('get-profit-loss', () => handleDb('getProfitLossData'))
+ipcMain.handle('get-profit-loss', (_, fromDate, toDate) => handleDb('getProfitLossData', fromDate, toDate))
 ipcMain.handle('get-gst-returns', (_, fromDate, toDate) => handleDb('getGstReturnsData', fromDate, toDate))
+
+// ─── Profit & Loss PDF Export ───
+ipcMain.handle('export-profit-loss-pdf', async (event, reportData, storeData, fromDate, toDate, periodLabel) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const defaultPath = `Profit_and_Loss_${new Date().toISOString().split('T')[0]}.pdf`
+
+  const { filePath, canceled } = await dialog.showSaveDialog(win, {
+    title: 'Export Profit & Loss Statement PDF',
+    defaultPath: defaultPath,
+    filters: [{ name: 'PDF Files', extensions: ['pdf'] }]
+  })
+
+  if (canceled || !filePath) return { success: false, canceled: true }
+
+  try {
+    const fmt = (val) => {
+      const num = Number(val || 0)
+      return (num < 0 ? `(${Math.abs(num).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})` : num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
+    }
+
+    const isLoss = reportData.netProfit < 0
+    const totalDr = (reportData.directExpenses || []).reduce((s, e) => s + e.amount, 0) + 
+      (reportData.indirectExpenses || []).reduce((s, e) => s + e.amount, 0) + 
+      (reportData.openingStock || 0) + 
+      (reportData.purchases || 0) + 
+      (reportData.grossProfit > 0 ? reportData.grossProfit : 0) + 
+      (reportData.grossProfit < 0 ? Math.abs(reportData.grossProfit) : 0) + 
+      (reportData.netProfit > 0 ? reportData.netProfit : 0)
+
+    const totalCr = (reportData.directExpenses || []).reduce((s, e) => s + e.amount, 0) + 
+      (reportData.indirectIncomes || []).reduce((s, e) => s + e.amount, 0) + 
+      (reportData.sales || 0) + 
+      (reportData.closingStock || 0) + 
+      (reportData.grossProfit < 0 ? Math.abs(reportData.grossProfit) : 0) + 
+      (reportData.grossProfit > 0 ? reportData.grossProfit : 0) + 
+      (reportData.netProfit < 0 ? Math.abs(reportData.netProfit) : 0)
+
+    // Calculate Dr total and Cr total for the final balancing figure
+    const totalPnLDr = (reportData.indirectExpenses || []).reduce((s, e) => s + e.amount, 0) + 
+      (reportData.grossProfit < 0 ? Math.abs(reportData.grossProfit) : 0) + 
+      (reportData.netProfit > 0 ? reportData.netProfit : 0)
+    const totalPnLCr = (reportData.indirectIncomes || []).reduce((s, e) => s + e.amount, 0) + 
+      (reportData.grossProfit > 0 ? reportData.grossProfit : 0) + 
+      (reportData.netProfit < 0 ? Math.abs(reportData.netProfit) : 0)
+
+    let directExpRows = (reportData.directExpenses || []).map(e => `
+      <tr>
+        <td style="padding: 6px 12px 6px 24px; color: #475569;">${e.name}</td>
+        <td style="padding: 6px 12px; text-align: right; font-weight: 600;">${fmt(e.amount)}</td>
+      </tr>
+    `).join('')
+
+    let indirectExpRows = (reportData.indirectExpenses || []).map(e => `
+      <tr>
+        <td style="padding: 6px 12px 6px 24px; color: #475569;">${e.name}</td>
+        <td style="padding: 6px 12px; text-align: right; font-weight: 600;">${fmt(e.amount)}</td>
+      </tr>
+    `).join('')
+
+    let indirectIncRows = (reportData.indirectIncomes || []).map(e => `
+      <tr>
+        <td style="padding: 6px 12px 6px 24px; color: #475569;">${e.name}</td>
+        <td style="padding: 6px 12px; text-align: right; font-weight: 600;">${fmt(e.amount)}</td>
+      </tr>
+    `).join('')
+
+    const fullHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  @page { size: A4 portrait; margin: 0; }
+  @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Outfit', Arial, sans-serif; width: 210mm; min-height: 297mm; padding: 12mm; color: #1e293b; background: #fff; }
+  .wrapper { border: 1px solid #cbd5e1; border-radius: 10px; padding: 16px; display: flex; flex-direction: column; min-height: 273mm; }
+  .header { display: flex; justify-content: space-between; align-items: flex-end; padding-bottom: 12px; border-bottom: 2px solid #0f172a; margin-bottom: 16px; }
+  .table-box { display: flex; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; flex: 1; }
+  .table-col { flex: 1; display: flex; flex-direction: column; }
+  .table-col:first-child { border-right: 1px solid #cbd5e1; }
+  .col-header { background: #f1f5f9; padding: 8px 12px; border-bottom: 1px solid #cbd5e1; font-weight: 800; font-size: 11px; text-transform: uppercase; color: #475569; display: flex; justify-content: space-between; }
+  table.items { width: 100%; border-collapse: collapse; }
+  table.items td { font-size: 12px; border-bottom: 1px solid #f1f5f9; }
+  .section-row { font-weight: 700; color: #0f172a; }
+  .badge-profit { background: #f0fdf4; color: #166534; padding: 6px 12px; font-weight: 800; border-radius: 6px; border: 1px solid #bbf7d0; display: flex; justify-content: space-between; margin: 8px 12px; }
+  .badge-loss { background: #fff1f2; color: #be123c; padding: 6px 12px; font-weight: 800; border-radius: 6px; border: 1px solid #fecdd3; display: flex; justify-content: space-between; margin: 8px 12px; }
+  .total-row { margin-top: auto; background: #f8fafc; border-top: 1px solid #cbd5e1; padding: 10px 12px; display: flex; justify-content: space-between; font-weight: 800; font-size: 13px; }
+  .summary-bar { margin-top: 16px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; display: flex; justify-content: space-between; font-size: 12px; }
+</style>
+</head><body>
+  <div class="wrapper">
+    <div class="header">
+      <div>
+        <h1 style="font-size: 24px; font-weight: 800; color: #0f172a; margin: 0;">${(storeData?.store_name || 'HOMOEO STORE').toUpperCase()}</h1>
+        <p style="font-size: 12px; color: #64748b; margin-top: 2px;">${storeData?.address_line1 || ''} ${storeData?.address_line2 ? ', ' + storeData.address_line2 : ''}</p>
+        <p style="font-size: 12px; color: #64748b;">Phone: ${storeData?.phone || '-'} | GSTIN: ${storeData?.gstin || '-'}</p>
+      </div>
+      <div style="text-align: right;">
+        <h2 style="font-size: 18px; font-weight: 800; color: #047857; margin: 0;">PROFIT & LOSS ACCOUNT</h2>
+        <p style="font-size: 12px; color: #475569; font-weight: 600; margin-top: 2px;">Trading & Income Statement</p>
+        <p style="font-size: 11px; color: #64748b; margin-top: 2px;">${periodLabel || (fromDate && toDate ? `${fromDate} to ${toDate}` : 'Full Financial Year')}</p>
+      </div>
+    </div>
+
+    <div class="table-box">
+      <!-- DEBIT SIDE -->
+      <div class="table-col">
+        <div class="col-header">
+          <span>Particulars (Dr.)</span>
+          <span>Amount (₹)</span>
+        </div>
+        <div style="flex: 1;">
+          <table class="items">
+            <tbody>
+              <tr class="section-row">
+                <td style="padding: 8px 12px;">Opening Stock</td>
+                <td style="padding: 8px 12px; text-align: right;">${fmt(reportData.openingStock)}</td>
+              </tr>
+              <tr class="section-row">
+                <td style="padding: 8px 12px;">Purchase Accounts</td>
+                <td style="padding: 8px 12px; text-align: right;">${fmt(reportData.purchases)}</td>
+              </tr>
+              <tr class="section-row">
+                <td colspan="2" style="padding: 8px 12px; background: #fafafa;">Direct Expenses</td>
+              </tr>
+              ${directExpRows || '<tr><td colspan="2" style="padding: 6px 24px; color: #94a3b8; font-size: 11px;">Nil</td></tr>'}
+              ${reportData.grossProfit > 0 ? `
+                <tr>
+                  <td colspan="2">
+                    <div class="badge-profit">
+                      <span>Gross Profit c/o</span>
+                      <span>${fmt(reportData.grossProfit)}</span>
+                    </div>
+                  </td>
+                </tr>
+              ` : ''}
+              ${reportData.grossProfit < 0 ? `
+                <tr class="section-row" style="color: #be123c;">
+                  <td style="padding: 8px 12px;">Gross Loss b/f</td>
+                  <td style="padding: 8px 12px; text-align: right;">${fmt(Math.abs(reportData.grossProfit))}</td>
+                </tr>
+              ` : ''}
+              <tr class="section-row">
+                <td colspan="2" style="padding: 8px 12px; background: #fafafa;">Indirect Expenses</td>
+              </tr>
+              ${indirectExpRows || '<tr><td colspan="2" style="padding: 6px 24px; color: #94a3b8; font-size: 11px;">Nil</td></tr>'}
+              ${!isLoss ? `
+                <tr>
+                  <td colspan="2">
+                    <div class="badge-profit">
+                      <span>NET PROFIT</span>
+                      <span>${fmt(reportData.netProfit)}</span>
+                    </div>
+                  </td>
+                </tr>
+              ` : ''}
+            </tbody>
+          </table>
+        </div>
+        <div class="total-row">
+          <span>TOTAL</span>
+          <span>₹ ${fmt(totalPnLDr)}</span>
+        </div>
+      </div>
+
+      <!-- CREDIT SIDE -->
+      <div class="table-col">
+        <div class="col-header">
+          <span>Particulars (Cr.)</span>
+          <span>Amount (₹)</span>
+        </div>
+        <div style="flex: 1;">
+          <table class="items">
+            <tbody>
+              <tr class="section-row">
+                <td style="padding: 8px 12px;">Sales Accounts</td>
+                <td style="padding: 8px 12px; text-align: right;">${fmt(reportData.sales)}</td>
+              </tr>
+              <tr class="section-row">
+                <td style="padding: 8px 12px;">Closing Stock</td>
+                <td style="padding: 8px 12px; text-align: right;">${fmt(reportData.closingStock)}</td>
+              </tr>
+              ${reportData.grossProfit < 0 ? `
+                <tr>
+                  <td colspan="2">
+                    <div class="badge-loss">
+                      <span>Gross Loss c/o</span>
+                      <span>${fmt(Math.abs(reportData.grossProfit))}</span>
+                    </div>
+                  </td>
+                </tr>
+              ` : ''}
+              ${reportData.grossProfit > 0 ? `
+                <tr class="section-row" style="color: #166534;">
+                  <td style="padding: 8px 12px;">Gross Profit b/f</td>
+                  <td style="padding: 8px 12px; text-align: right;">${fmt(reportData.grossProfit)}</td>
+                </tr>
+              ` : ''}
+              <tr class="section-row">
+                <td colspan="2" style="padding: 8px 12px; background: #fafafa;">Indirect Incomes</td>
+              </tr>
+              ${indirectIncRows || '<tr><td colspan="2" style="padding: 6px 24px; color: #94a3b8; font-size: 11px;">Nil</td></tr>'}
+              ${isLoss ? `
+                <tr>
+                  <td colspan="2">
+                    <div class="badge-loss">
+                      <span>NET LOSS</span>
+                      <span>${fmt(Math.abs(reportData.netProfit))}</span>
+                    </div>
+                  </td>
+                </tr>
+              ` : ''}
+            </tbody>
+          </table>
+        </div>
+        <div class="total-row">
+          <span>TOTAL</span>
+          <span>₹ ${fmt(totalPnLCr)}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="summary-bar">
+      <div><strong>Total Turnover:</strong> ₹ ${fmt(reportData.sales)}</div>
+      <div><strong>Gross Result:</strong> ${reportData.grossProfit >= 0 ? 'Profit of ₹ ' + fmt(reportData.grossProfit) : 'Loss of ₹ ' + fmt(Math.abs(reportData.grossProfit))}</div>
+      <div><strong>Net Outcome:</strong> <span style="color: ${isLoss ? '#be123c' : '#15803d'}; font-weight: 800;">${isLoss ? 'Net Loss: ₹ ' + fmt(Math.abs(reportData.netProfit)) : 'Net Profit: ₹ ' + fmt(reportData.netProfit)}</span></div>
+    </div>
+
+    <div style="margin-top: 12px; font-size: 10px; color: #94a3b8; text-align: center;">
+      Generated by HomoeoStore ERP &bull; ${new Date().toLocaleString('en-IN')} &bull; This is a computer generated document.
+    </div>
+  </div>
+</body></html>`
+
+    const os = require('os')
+    const tmpFile = path.join(os.tmpdir(), `pnl_${Date.now()}.html`)
+    fs.writeFileSync(tmpFile, fullHtml, 'utf-8')
+    
+    const pdfWin = new BrowserWindow({
+      width: 794,
+      height: 1123,
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true }
+    })
+    
+    await pdfWin.loadFile(tmpFile)
+    
+    const pdfData = await pdfWin.webContents.printToPDF({
+      marginsType: 1,
+      pageSize: 'A4',
+      printBackground: true,
+      landscape: false,
+      preferCSSPageSize: true
+    })
+    
+    fs.writeFileSync(filePath, pdfData)
+    pdfWin.close()
+    try { fs.unlinkSync(tmpFile) } catch(e) {}
+    
+    return { success: true, filePath }
+  } catch (error) {
+    console.error('Failed to export Profit & Loss PDF:', error)
+    return { success: false, error: error.message }
+  }
+})
 
 // Godown Master
 ipcMain.handle('get-godowns', () => handleDb('getGodowns'))
@@ -1264,7 +1548,67 @@ ipcMain.handle('get-printers', async (event) => {
 })
 
 ipcMain.handle('print-receipt', async (event, receiptData) => {
-  console.log('\n========== [THERMAL PRINT JOB] ==========');
+  const printerName = db.getSetting('thermal_printer_name') || 'Champ RP Series';
+  const currentMode = network.getMode();
+
+  // 1. Check if the printer is connected to this local computer
+  let hasPrinterLocally = false;
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && win.webContents) {
+      const printers = await win.webContents.getPrintersAsync();
+      hasPrinterLocally = printers.some(p => p.name === printerName);
+    }
+  } catch (err) {
+    console.error('Failed to query local printers:', err.message);
+  }
+
+  if (hasPrinterLocally) {
+    console.log(`[Print IPC] Printer "${printerName}" found locally. Printing...`);
+    return await printReceiptLocal(receiptData);
+  }
+
+  // 2. Not local. Check network mode to route.
+  console.log(`[Print IPC] Printer "${printerName}" not local. Current network mode: ${currentMode}`);
+
+  if (currentMode === 'CLIENT') {
+    // Forward the print request to the Server
+    const serverIp = network.getServerIp();
+    if (!serverIp) {
+      console.error('[Print IPC] Server IP not discovered yet. Fallback printing locally.');
+      return await printReceiptLocal(receiptData);
+    }
+    console.log(`[Print IPC] Client forwarding print job to Server at ${serverIp}...`);
+    try {
+      const res = await axios.post(`http://${serverIp}:4000/api/route-print-job`, { receiptData }, { timeout: 5000 });
+      return res.data;
+    } catch (err) {
+      console.error('[Print IPC] Failed to route print job to Server:', err.message);
+      console.log('[Print IPC] Fallback printing locally on Client.');
+      return await printReceiptLocal(receiptData);
+    }
+  } else if (currentMode === 'SERVER') {
+    // Server doesn't have it locally. Find a client that has it.
+    for (const clientIp in global.connectedClients) {
+      const client = global.connectedClients[clientIp];
+      if (client.printers && client.printers.includes(printerName)) {
+        console.log(`[Print IPC] Server routing print job to Client: ${clientIp}...`);
+        global.printQueues[clientIp] = global.printQueues[clientIp] || [];
+        global.printQueues[clientIp].push(receiptData);
+        return { success: true, queued: true, clientIp };
+      }
+    }
+    console.warn('[Print IPC] No connected client has the printer. Fallback printing locally on Server.');
+    return await printReceiptLocal(receiptData);
+  } else {
+    // Standalone / LOCAL mode
+    return await printReceiptLocal(receiptData);
+  }
+});
+
+// Helper function to print a receipt locally
+async function printReceiptLocal(receiptData) {
+  console.log('\n========== [LOCAL THERMAL PRINT JOB] ==========');
   const os = require('os')
   const { execSync } = require('child_process')
   const fs = require('fs')
@@ -1395,7 +1739,102 @@ ipcMain.handle('print-receipt', async (event, receiptData) => {
     console.log('==========================================\n');
     return { success: false, error: error.message || String(error) };
   }
-});
+}
+
+// Global print router registries
+global.connectedClients = global.connectedClients || {};
+global.printQueues = global.printQueues || {};
+
+global.onDatabaseChanged = (action) => {
+  console.log(`[Main] onDatabaseChanged called for action: ${action}`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    console.log(`[Main] Sending database-changed IPC to mainWindow`);
+    mainWindow.webContents.send('database-changed', action);
+  } else {
+    console.warn(`[Main] mainWindow is not available to send database-changed`);
+  }
+};
+
+// Server-side print routing coordinator
+global.onRoutePrintJob = async (receiptData) => {
+  console.log('[Print Router] Routing print job on Server...');
+  const printerName = db.getSetting('thermal_printer_name') || 'Champ RP Series';
+  
+  // 1. Check if printer is local to the Server
+  let hasPrinterLocally = false;
+  try {
+    if (mainWindow && mainWindow.webContents) {
+      const printers = await mainWindow.webContents.getPrintersAsync();
+      hasPrinterLocally = printers.some(p => p.name === printerName);
+    }
+  } catch (err) {
+    console.error('[Print Router] Failed to query Server printers:', err.message);
+  }
+
+  if (hasPrinterLocally) {
+    console.log(`[Print Router] Printer "${printerName}" found locally on Server. Printing...`);
+    return await printReceiptLocal(receiptData);
+  }
+
+  // 2. Not local. Search in registered client printers
+  console.log(`[Print Router] Printer "${printerName}" not local. Checking connected clients...`);
+  for (const clientIp in global.connectedClients) {
+    const client = global.connectedClients[clientIp];
+    if (client.printers && client.printers.includes(printerName)) {
+      console.log(`[Print Router] Found printer on Client: ${clientIp}. Queuing print job...`);
+      global.printQueues[clientIp] = global.printQueues[clientIp] || [];
+      global.printQueues[clientIp].push(receiptData);
+      return { success: true, queued: true, clientIp };
+    }
+  }
+
+  // 3. Fallback: Print locally on Server anyway
+  console.warn(`[Print Router] Printer "${printerName}" not found online. Fallback local printing.`);
+  return await printReceiptLocal(receiptData);
+};
+
+// Client-side print job polling loop
+function startClientPrintPolling() {
+  setInterval(async () => {
+    try {
+      if (network.getMode() !== 'CLIENT') return;
+      const serverIp = network.getServerIp();
+      if (!serverIp) return; // Wait for server discovery
+
+      // Query local printers using mainWindow
+      let printerNames = [];
+      if (mainWindow && mainWindow.webContents) {
+        const printers = await mainWindow.webContents.getPrintersAsync();
+        printerNames = printers.map(p => p.name);
+      }
+
+      const clientIp = network.getLocalIp();
+      const response = await axios.post(`http://${serverIp}:4000/api/print-poll`, {
+        clientIp,
+        printers: printerNames
+      }, { timeout: 2000 });
+
+      if (response.data && response.data.success && response.data.jobs && response.data.jobs.length > 0) {
+        console.log(`[Print Poll] Received ${response.data.jobs.length} routed print job(s) from Server.`);
+        for (const receiptData of response.data.jobs) {
+          try {
+            await printReceiptLocal(receiptData);
+          } catch (printErr) {
+            console.error('[Print Poll] Failed to print receipt:', printErr.message);
+          }
+        }
+      }
+    } catch (err) {
+      // Fail silently for network errors during background polling
+      if (err.code !== 'ECONNREFUSED' && err.code !== 'ETIMEDOUT') {
+        console.error('[Print Poll Error]:', err.message);
+      }
+    }
+  }, 3000);
+}
+
+// Start polling immediately in background
+startClientPrintPolling();
 
 // Network Modes
 ipcMain.handle('get-network-status', () => network.getStatus())

@@ -1,124 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import DateInput from '../components/DateInput'
+import AutocompleteDropdown from '../components/AutocompleteDropdown'
 import './WholesaleBilling.css'
 import { useCache } from '../context/CacheContext'
-
-function AutocompleteDropdown({ value, onChange, options, onEnter, placeholder, id, inputStyle, readOnly, tabIndex, maxItems = 50 }) {
-    const [show, setShow] = useState(false)
-    const [focusedIdx, setFocusedIdx] = useState(-1)
-
-    const filtered = show ? options.filter(o => {
-        if (o._searchKey) {
-            const searchTerms = String(value||'').toLowerCase().split(/\s+/).filter(Boolean);
-            return searchTerms.every(term => o._searchKey.includes(term));
-        }
-        const searchStr = (o.name + ' ' + (o.potency || '')).toLowerCase();
-        const searchTerms = String(value||'').toLowerCase().split(/\s+/).filter(Boolean);
-        return searchTerms.every(term => searchStr.includes(term));
-    }).slice(0, maxItems) : []
-
-    useEffect(() => {
-        if (show && filtered.length > 0) {
-            setFocusedIdx(0)
-        } else if (!show) {
-            setFocusedIdx(-1)
-        }
-    }, [show, value, options])
-
-    function handleKeyDown(e) {
-        if (readOnly) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                onEnter();
-            }
-            return;
-        }
-        if (!show) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                onEnter();
-            }
-            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                setShow(true);
-            }
-            return
-        }
-        if (e.key === 'ArrowDown') {
-            e.preventDefault()
-            setFocusedIdx(prev => prev < filtered.length - 1 ? prev + 1 : prev)
-        } else if (e.key === 'ArrowUp') {
-            e.preventDefault()
-            setFocusedIdx(prev => prev > 0 ? prev - 1 : prev)
-        } else if (e.key === 'Enter') {
-            e.preventDefault()
-            if (focusedIdx >= 0 && focusedIdx < filtered.length) {
-                onChange(filtered[focusedIdx])
-                setShow(false)
-                setFocusedIdx(-1)
-                setTimeout(onEnter, 50)
-            } else {
-                setShow(false)
-                onEnter()
-            }
-        } else if (e.key === 'Escape') {
-            e.stopPropagation()
-            setShow(false)
-            setFocusedIdx(-1)
-        }
-    }
-
-    return (
-        <div style={{ position: 'relative', width: '100%' }}>
-            <input className="wb-input modern-input" id={id}
-                style={inputStyle}
-                value={value}
-                onChange={e => { if (readOnly) return; onChange(e.target.value); setShow(true); setFocusedIdx(-1); }}
-                onFocus={() => { if (readOnly) return; setShow(true); setFocusedIdx(-1); }}
-                onBlur={() => setTimeout(() => setShow(false), 200)}
-                onKeyDown={handleKeyDown}
-                placeholder={placeholder}
-                autoComplete="off"
-                readOnly={readOnly}
-                tabIndex={tabIndex}
-            />
-            {show && filtered.length > 0 && (
-                <div style={{
-                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 9999,
-                    background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px',
-                    maxHeight: '250px', overflowY: 'auto', boxSizing: 'border-box',
-                    boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)'
-                }}>
-                    {filtered.map((opt, idx) => {
-                        const isHigh = idx === focusedIdx
-                        return (
-                            <div 
-                                key={opt.id || opt.name || idx}
-                                onClick={() => { onChange(opt); setShow(false); setTimeout(onEnter, 50); }}
-                                onMouseEnter={() => setFocusedIdx(idx)}
-                                style={{
-                                    padding: '10px 10px', fontSize: '13px', cursor: 'pointer', fontFamily: 'Outfit, sans-serif',
-                                    background: isHigh ? '#ecfdf5' : '#fff', color: isHigh ? '#059669' : '#334155',
-                                    fontWeight: isHigh ? '600' : '500', borderBottom: '1px solid #f8fafc',
-                                    transition: 'all 0.15s ease'
-                                }}
-                            >
-                                <span style={{ fontWeight: '700' }}>{opt.name}</span>
-                                {opt.company && <span style={{ color: '#94a3b8', fontSize: '11px', marginLeft: '6px' }}>({opt.company})</span>}
-                                {opt.potency && <span style={{ background: '#f1f5f9', color: '#475569', padding: '2px 6px', borderRadius: '4px', fontSize: '11px', marginLeft: '8px', fontWeight: '700' }}>{opt.potency}</span>}
-                                {opt.unit && <span style={{ background: 'rgba(248,250,252,0.6)', color: '#64748b', padding: '2px 6px', borderRadius: '4px', fontSize: '11px', marginLeft: '4px', fontWeight: '600' }}>{opt.unit}</span>}
-                                {opt.category && (
-                                    <span style={{ color: '#3b82f6', fontSize: '11px', marginLeft: '8px', fontWeight: '700' }}>
-                                        [{opt.category}]
-                                    </span>
-                                )}
-                            </div>
-                        )
-                    })}
-                </div>
-            )}
-        </div>
-    )
-}
 
 export default function PurchaseEntry({ isYearLocked }) {
     const { 
@@ -682,6 +566,7 @@ export default function PurchaseEntry({ isYearLocked }) {
                             onEnter={() => document.getElementById('medSearch')?.focus()}
                             placeholder="Select company..."
                             maxItems={1000}
+                            passObject={true}
                         />
                     </div>
                     <div>
@@ -716,6 +601,7 @@ export default function PurchaseEntry({ isYearLocked }) {
                             onEnter={() => document.getElementById('batchNo').focus()}
                             placeholder="Search medicine..."
                             maxItems={1000}
+                            passObject={true}
                         />
                     </div>
                     <div>

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   getFinancialYears: () => ipcRenderer.invoke('get-financial-years'),
   selectFinancialYear: (dbName) => ipcRenderer.invoke('select-financial-year', dbName),
   createFinancialYear: (data) => ipcRenderer.invoke('create-financial-year', data),
+  getCurrentDbName: () => ipcRenderer.invoke('get-current-db-name'),
 
   // ─── Medicines ───
   getMedicines: () => ipcRenderer.invoke('get-medicines'),
@@ -21,6 +22,9 @@ contextBridge.exposeInMainWorld('api', {
 
   // ─── Billing ───
   createBill: (data) => ipcRenderer.invoke('create-bill', data),
+  updateBill: (data) => ipcRenderer.invoke('update-bill', data),
+  cancelRetailBill: (data) => ipcRenderer.invoke('cancel-retail-bill', data),
+  deleteRetailBill: (id) => ipcRenderer.invoke('delete-retail-bill', id),
   getBills: () => ipcRenderer.invoke('get-bills'),
   getBillById: (id) => ipcRenderer.invoke('get-bill-by-id', id),
   createWholesaleBill: (data) => ipcRenderer.invoke('create-wholesale-bill', data),
@@ -28,6 +32,8 @@ contextBridge.exposeInMainWorld('api', {
   getWholesaleBills: () => ipcRenderer.invoke('get-wholesale-bills'),
   getWholesaleBillById: (id) => ipcRenderer.invoke('get-wholesale-bill-by-id', id),
   updateWholesaleBill: (data) => ipcRenderer.invoke('update-wholesale-bill', data),
+  cancelWholesaleBill: (data) => ipcRenderer.invoke('cancel-wholesale-bill', data),
+  deleteWholesaleBill: (id) => ipcRenderer.invoke('delete-wholesale-bill', id),
   getNextWholesaleBillNumber: () => ipcRenderer.invoke('get-next-wholesale-bill-number'),
   exportWholesalePdf: (billData, storeData, copyType) => ipcRenderer.invoke('export-wholesale-pdf', billData, storeData, copyType),
   exportEwayJson: (billData, storeProfile) => ipcRenderer.invoke('export-eway-json', billData, storeProfile),
@@ -66,6 +72,7 @@ contextBridge.exposeInMainWorld('api', {
   deleteLedger: (id) => ipcRenderer.invoke('delete-ledger', id),
   addVoucher: (data) => ipcRenderer.invoke('add-voucher', data),
   getLedgerStatement: (ledger_id, fromDate, toDate) => ipcRenderer.invoke('get-ledger-statement', { ledger_id, fromDate, toDate }),
+  getRecentExpenses: () => ipcRenderer.invoke('get-recent-expenses'),
   getDayBook: (date) => ipcRenderer.invoke('get-day-book', date),
 
   // ─── HSN/SAC ───
@@ -101,6 +108,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // ─── Reports ───
   getSalesReport: (range) => ipcRenderer.invoke('get-sales-report', range),
+  getMonthlyItemSales: (options) => ipcRenderer.invoke('get-monthly-item-sales', options),
   getGstSalesRegisterPaginated: (data) => ipcRenderer.invoke('get-gst-sales-register-paginated', data),
   getGstPurchaseRegisterPaginated: (data) => ipcRenderer.invoke('get-gst-purchase-register-paginated', data),
   getGstReturns: (fromDate, toDate) => ipcRenderer.invoke('get-gst-returns', fromDate, toDate),
@@ -117,7 +125,8 @@ contextBridge.exposeInMainWorld('api', {
   // ─── Dashboard ───
   getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats'),
   getBalanceSheet: () => ipcRenderer.invoke('get-balance-sheet'),
-  getProfitLoss: () => ipcRenderer.invoke('get-profit-loss'),
+  getProfitLoss: (fromDate, toDate) => ipcRenderer.invoke('get-profit-loss', fromDate, toDate),
+  exportProfitLossPdf: (data, storeProfile, fromDate, toDate, periodLabel) => ipcRenderer.invoke('export-profit-loss-pdf', data, storeProfile, fromDate, toDate, periodLabel),
 
   // ─── Godown Master ───
   getGodowns: () => ipcRenderer.invoke('get-godowns'),
@@ -164,5 +173,12 @@ contextBridge.exposeInMainWorld('api', {
   setNetworkMode: (mode) => ipcRenderer.invoke('set-network-mode', mode),
 
   // Renderer logging to server file
-  logRendererEvent: (level, message) => ipcRenderer.invoke('log-renderer-event', level, message)
+  logRendererEvent: (level, message) => ipcRenderer.invoke('log-renderer-event', level, message),
+
+  // Real-time Database Sync from Mobile Server
+  onDatabaseChanged: (callback) => {
+    const handler = (event, action) => callback(action);
+    ipcRenderer.on('database-changed', handler);
+    return () => ipcRenderer.removeListener('database-changed', handler);
+  }
 })

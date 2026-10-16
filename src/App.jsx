@@ -37,6 +37,8 @@ import PurchaseEntry from './pages/PurchaseEntry'
 import BackupSetup from './pages/BackupSetup'
 import Login from './pages/Login'
 import DayBook from './pages/DayBook'
+import ExpenseTracker from './pages/ExpenseTracker'
+import MonthlyItemSales from './pages/MonthlyItemSales'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '📊' },
@@ -55,6 +57,7 @@ const NAV = [
   {
     id: 'accounts-payments', label: 'Accounts & Payments', icon: '💸',
     children: [
+      { id: 'expense-tracker', label: 'Expense Tracker' },
       { id: 'voucher-entry', label: 'Voucher Entry' },
       { id: 'party-maintenance', label: 'Party / Account Maintenance' },
       { id: 'ledger-book', label: 'Ledger Book (Passbook)' },
@@ -74,6 +77,7 @@ const NAV = [
     id: 'reports-analytics', label: 'Reports & Analytics', icon: '📈',
     children: [
       { id: 'reports', label: 'Sales / Business Report' },
+      { id: 'monthly_item_sales', label: 'Medicine Sales (Last 3 Months)' },
       { id: 'stock_register', label: 'Stock Register (Closing)' },
       { id: 'item_ledger', label: 'Item Ledger (In/Out)' },
       { id: 'low-stock-report', label: 'Low Stock Report' },
@@ -158,6 +162,28 @@ export default function App() {
       return;
     }
     
+    // In CLIENT mode: Always sync active Financial Year directly from the Server.
+    // A Client must NEVER override or force the Server's database on startup!
+    if (netStatus.mode === 'CLIENT') {
+      Promise.all([
+        window.api.getCurrentDbName ? window.api.getCurrentDbName() : Promise.resolve(null),
+        window.api.getFinancialYears()
+      ]).then(([serverDbName, years]) => {
+        const fy = years.find(y => y.dbName === serverDbName) || years[years.length - 1];
+        if (fy) {
+          setCurrentFYData(fy);
+          localStorage.setItem('last_selected_fy_CLIENT', fy.dbName);
+          localStorage.setItem('last_selected_fy', fy.dbName);
+          setSelectedFY(true);
+          setFyInitialized(true);
+        }
+      }).catch(err => {
+        console.error("Failed to sync financial year from server:", err);
+        setFyInitialized(true);
+      });
+      return;
+    }
+
     const modeKey = `last_selected_fy_${netStatus.mode}`;
     
     // Migrate legacy year selection for convenience
@@ -267,6 +293,7 @@ export default function App() {
         setExpanded(prev => ({ ...prev, 'inventory-expiry': true }));
       }
 
+
     }
     window.addEventListener('keydown', handleShortcuts);
     return () => window.removeEventListener('keydown', handleShortcuts);
@@ -332,8 +359,9 @@ export default function App() {
       case 'sales-return': return <SalesReturn />
       case 'purchase-return': return <PurchaseReturn />
       case 'wholesale-return': return <WholesaleReturn />
-      case 'stock-register': return <StockRegister />
+      case 'stock_register': return <StockRegister />
       case 'purchase': return <PurchaseEntry isYearLocked={!!currentFYData?.is_locked} />
+      case 'expense-tracker': return <ExpenseTracker />
       case 'voucher-entry': return <VoucherEntry />
       case 'stock-update': return <StockUpdate />
       case 'godown-master': return <GodownMaster />
@@ -341,6 +369,7 @@ export default function App() {
       case 'mr-master': return <MRMaster />
       case 'party-maintenance': return <PartyMaintenance />
       case 'reports': return <Reports />
+      case 'monthly_item_sales': return <MonthlyItemSales />
       case 'low-stock-report': return <LowStockReport />
       case 'balance-sheet': return <BalanceSheet />
       case 'pl': return <ProfitLoss />

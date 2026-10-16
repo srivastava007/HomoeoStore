@@ -4,3 +4,16 @@ release
 .env
 .DS_Store
 *.db
+
+# Testing artifacts & logs
+test-results/
+tests/test-user-data/
+*.log
+
+# Temporary scrapers and scratch files
+acon.html
+dump_html.py
+output.json
+scrape_boericke.py
+script.js
+test_parse.py

@@ -1,130 +1,12 @@
 import { useState, useEffect, useMemo } from 'react'
 import WholesaleInvoicePrint from '../components/WholesaleInvoicePrint'
+import AutocompleteDropdown from '../components/AutocompleteDropdown'
 import './WholesaleBilling.css'
 import DateInput from '../components/DateInput'
 import { useCache } from '../context/CacheContext'
+import CancelBillModal from '../components/CancelBillModal'
 
-function AutocompleteDropdown({ value, onChange, options, onEnter, placeholder, id, className, readOnly, tabIndex, nameOnly, onEscape, dropdownWidth, maxItems = 50 }) {
-    const [show, setShow] = useState(false)
-    const [focusedIdx, setFocusedIdx] = useState(-1)
-
-    const searchTerms = useMemo(() => {
-        return String(value || '').toLowerCase().split(/\s+/).filter(Boolean);
-    }, [value]);
-
-    const filtered = useMemo(() => {
-        if (!show) return [];
-        if (searchTerms.length === 0) return options.slice(0, maxItems);
-        return options.filter(o => {
-            if (o._searchKey && !nameOnly) {
-                return searchTerms.every(term => o._searchKey.includes(term));
-            }
-            if (nameOnly) {
-                if (o.nameLower) return searchTerms.every(term => o.nameLower.includes(term));
-                return searchTerms.every(term => String(o.name || '').toLowerCase().includes(term));
-            }
-            const searchStr = o.name + ' ' + (o.potency || '');
-            return searchTerms.every(term => searchStr.toLowerCase().includes(term));
-        }).slice(0, maxItems);
-    }, [show, options, searchTerms, nameOnly, maxItems]);
-
-    useEffect(() => {
-        if (show && filtered.length > 0) {
-            setFocusedIdx(0)
-        } else if (!show) {
-            setFocusedIdx(-1)
-        }
-    }, [show, filtered])
-
-    function handleKeyDown(e) {
-        if (readOnly) {
-            if (e.key === 'Enter') { e.preventDefault(); onEnter(); }
-            return;
-        }
-        if (!show) {
-            if (e.key === 'Enter') { e.preventDefault(); onEnter(); }
-            if (e.key === 'Escape' && onEscape) { e.preventDefault(); e.stopPropagation(); onEscape(); return; }
-            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') setShow(true);
-            return
-        }
-        if (e.key === 'ArrowDown') {
-            e.preventDefault()
-            setFocusedIdx(prev => prev < filtered.length - 1 ? prev + 1 : prev)
-        } else if (e.key === 'ArrowUp') {
-            e.preventDefault()
-            setFocusedIdx(prev => prev > 0 ? prev - 1 : prev)
-        } else if (e.key === 'Enter') {
-            e.preventDefault()
-            if (focusedIdx >= 0 && focusedIdx < filtered.length) {
-                onChange(filtered[focusedIdx])
-                setShow(false)
-                setFocusedIdx(-1)
-                setTimeout(onEnter, 50)
-            } else {
-                setShow(false)
-                onEnter()
-            }
-        } else if (e.key === 'Escape') {
-            e.stopPropagation()
-            setShow(false)
-            setFocusedIdx(-1)
-        }
-    }
-
-    return (
-        <div style={{ position: 'relative', width: '100%' }}>
-            <input 
-                id={id}
-                className={className}
-                value={value}
-                onChange={e => { if (readOnly) return; onChange(e.target.value); setShow(true); setFocusedIdx(0); }}
-                onFocus={() => { if (readOnly) return; setShow(true); setFocusedIdx(-1); }}
-                onBlur={() => setTimeout(() => setShow(false), 200)}
-                onKeyDown={handleKeyDown}
-                placeholder={placeholder}
-                autoComplete="off"
-                readOnly={readOnly}
-                tabIndex={tabIndex}
-            />
-            {show && filtered.length > 0 && (
-                <div style={{
-                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 9999,
-                    background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px',
-                    maxHeight: '250px', overflowY: 'auto', boxSizing: 'border-box',
-                    boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)',
-                    width: dropdownWidth || '100%'
-                }}>
-                    {filtered.map((opt, idx) => {
-                        const isHigh = idx === focusedIdx
-                        return (
-                            <div 
-                                key={opt.id || opt.name || idx}
-                                onClick={() => { onChange(opt); setShow(false); setTimeout(onEnter, 50); }}
-                                onMouseEnter={() => setFocusedIdx(idx)}
-                                style={{
-                                    padding: '10px 10px', fontSize: '13px', cursor: 'pointer', fontFamily: 'Outfit, sans-serif',
-                                    background: isHigh ? '#ecfdf5' : '#fff', color: isHigh ? '#059669' : '#334155',
-                                    fontWeight: isHigh ? '600' : '500', borderBottom: '1px solid #f8fafc',
-                                    transition: 'all 0.15s ease',
-                                    whiteSpace: dropdownWidth === 'max-content' ? 'nowrap' : 'normal',
-                                    wordBreak: 'break-word'
-                                }}
-                            >
-                                {opt.name} 
-                                {!nameOnly && opt.company ? <span style={{ color: '#94a3b8', fontSize: '12px', marginLeft: '8px' }}>({opt.company})</span> : null}
-                                {opt.potency ? <span style={{ background: '#f1f5f9', color: '#475569', padding: '2px 6px', borderRadius: '4px', fontSize: '11px', marginLeft: '8px', fontWeight: '700' }}>{opt.potency}</span> : null}
-                                {opt.unit ? <span style={{ background: '#f8fafc', color: '#64748b', padding: '2px 6px', borderRadius: '4px', fontSize: '11px', marginLeft: '4px', fontWeight: '600' }}>{opt.unit}</span> : null}
-                                {opt.category ? <span style={{ color: '#3b82f6', fontSize: '11px', marginLeft: '8px', fontWeight: '700' }}>[{opt.category}]</span> : null}
-                            </div>
-                        )
-                    })}
-                </div>
-            )}
-        </div>
-    )
-}
-
-function WholesaleHistory({ wholesaleBills, historySearchTerm, setHistorySearchTerm, loadHistory, loadingHistory, historyPage, historyTotalRows, historyLimit, setHistoryPage, handleEditBill, handleViewBill, handlePrintBill, openExportModal, isLocked }) {
+function WholesaleHistory({ wholesaleBills, historySearchTerm, setHistorySearchTerm, loadHistory, loadingHistory, historyPage, historyTotalRows, historyLimit, setHistoryPage, handleEditBill, handleViewBill, handlePrintBill, openExportModal, handleCancelBill, isLocked }) {
     const totalPages = Math.ceil(historyTotalRows / historyLimit) || 1;
 
     return (
@@ -158,23 +40,39 @@ function WholesaleHistory({ wholesaleBills, historySearchTerm, setHistorySearchT
                         </tr>
                     </thead>
                     <tbody>
-                        {wholesaleBills.map(bill => (
-                            <tr key={bill.id}>
+                        {wholesaleBills.map(bill => {
+                            const isCancelled = bill.status === 'CANCELLED';
+                            return (
+                            <tr key={bill.id} style={{ background: isCancelled ? '#fff5f5' : 'transparent' }}>
                                 <td>{new Date(bill.bill_date).toLocaleDateString('en-IN')}</td>
-                                <td style={{ color: '#3b82f6', fontWeight: '600' }}>{bill.bill_number}</td>
+                                <td style={{ color: isCancelled ? '#dc2626' : '#3b82f6', fontWeight: '600' }}>
+                                    <span style={{ textDecoration: isCancelled ? 'line-through' : 'none' }}>{bill.bill_number}</span>
+                                    {isCancelled && (
+                                        <span style={{ padding: '2px 6px', background: '#fee2e2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '4px', fontSize: '10px', fontWeight: '800', marginLeft: '6px' }}>CANCELLED</span>
+                                    )}
+                                </td>
                                 <td>{bill.party_name}</td>
                                 <td style={{ color: '#64748b' }}>{bill.bill_type}</td>
-                                <td style={{ color: '#10b981', fontWeight: '600' }}>₹{bill.net_amount?.toFixed(2)}</td>
+                                <td style={{ color: isCancelled ? '#94a3b8' : '#10b981', fontWeight: '600' }}>
+                                    <span style={{ textDecoration: isCancelled ? 'line-through' : 'none' }}>₹{bill.net_amount?.toFixed(2)}</span>
+                                </td>
                                 <td>
-                                    <div style={{ display: 'flex', gap: '8px' }}>
-                                        {!isLocked && <button onClick={() => handleEditBill(bill.id)} style={{ padding: '4px 10px', background: '#eab308', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Edit</button>}
+                                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                        {!isCancelled && !isLocked && <button onClick={() => handleEditBill(bill.id)} style={{ padding: '4px 10px', background: '#eab308', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Edit</button>}
                                         <button onClick={() => handleViewBill(bill.id)} style={{ padding: '4px 10px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>View</button>
-                                        <button onClick={() => handlePrintBill(bill.id)} style={{ padding: '4px 10px', background: '#e2e8f0', color: '#475569', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Print</button>
-                                        <button onClick={() => openExportModal(bill.id)} style={{ padding: '4px 10px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Export PDF</button>
+                                        {!isCancelled && <button onClick={() => handlePrintBill(bill.id)} style={{ padding: '4px 10px', background: '#e2e8f0', color: '#475569', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Print</button>}
+                                        {!isCancelled && <button onClick={() => openExportModal(bill.id)} style={{ padding: '4px 10px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Export PDF</button>}
+                                        {!isCancelled && !isLocked && (
+                                            <button onClick={() => handleCancelBill(bill)} title="Cancel this bill" style={{ padding: '4px 10px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>Cancel</button>
+                                        )}
+                                        {isCancelled && (
+                                            <span title={bill.cancellation_reason ? `Reason: ${bill.cancellation_reason}` : 'Cancelled'} style={{ padding: '3px 8px', background: '#fee2e2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '4px', fontSize: '11px', fontWeight: '700' }}>Cancelled</span>
+                                        )}
                                     </div>
                                 </td>
                             </tr>
-                        ))}
+                            );
+                        })}
                         {wholesaleBills.length === 0 && (
                             <tr><td colSpan="6" style={{ padding: '12px', textAlign: 'center', color: '#94a3b8' }}>No bills found</td></tr>
                         )}
@@ -308,6 +206,7 @@ function ItemEntryForm({ currentItem, setCurrentItem, companies, medicines, isAu
                         placeholder="Select company..."
                         className="wb-input modern-input"
                         maxItems={1000}
+                        passObject={true}
                     />
                 </div>
                 <div>
@@ -339,6 +238,7 @@ function ItemEntryForm({ currentItem, setCurrentItem, companies, medicines, isAu
                         nameOnly
                         dropdownWidth="max-content"
                         maxItems={1000}
+                        passObject={true}
                     />
                 </div>
                 <div><label className="wb-label">Power</label><input readOnly value={currentItem.potency} className="wb-input modern-input readonly" tabIndex={-1} /></div>
@@ -528,6 +428,7 @@ export default function WholesaleBilling({ isYearLocked = false }) {
     const [toast, setToast] = useState({ show: false, msg: '', type: 'success' })
     const [heldBills, setHeldBills] = useState([])
     const [showHeldModal, setShowHeldModal] = useState(false)
+    const [cancelModal, setCancelModal] = useState({ show: false, bill: null })
 
     const [billDetails, setBillDetails] = useState({
         ledgerId: '', billType: 'WS', billNumber: 'Loading...',
@@ -963,7 +864,8 @@ export default function WholesaleBilling({ isYearLocked = false }) {
                     historyPage={historyPage} historyTotalRows={historyTotalRows} historyLimit={historyLimit} setHistoryPage={setHistoryPage}
                     handleEditBill={handleEditBill}
                     handleViewBill={handleViewBill} handlePrintBill={handlePrintBill} openExportModal={openExportModal}
-                isLocked={isLocked} />
+                    handleCancelBill={(bill) => setCancelModal({ show: true, bill })}
+                    isLocked={isLocked} />
             ) : (
                 <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start' }}>
                     <div style={{ flex: 1 }}>
@@ -1077,6 +979,15 @@ export default function WholesaleBilling({ isYearLocked = false }) {
                             </div>
                         </div>
 
+                        {selectedViewBill.status === 'CANCELLED' && (
+                            <div style={{ background: '#fee2e2', border: '1px solid #fca5a5', padding: '10px 16px', borderRadius: '8px', marginBottom: '16px', color: '#dc2626', fontWeight: '700', fontSize: '13px' }}>
+                                ⚠️ THIS WHOLESALE INVOICE WAS CANCELLED
+                                {selectedViewBill.cancellation_reason && (
+                                    <span style={{ fontWeight: '500', color: '#991b1b', marginLeft: '6px' }}>— Reason: {selectedViewBill.cancellation_reason}</span>
+                                )}
+                            </div>
+                        )}
+
                         <div style={{ display: 'flex', gap: '12px', marginBottom: '12px', background: '#f8fafc', padding: '20px', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
                             <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '13px' }}>
                                 <div><span style={{ color: '#64748b', display: 'block', marginBottom: '4px' }}>Bill Type</span><strong style={{ color: '#334155' }}>{selectedViewBill.bill_type}</strong></div>
@@ -1146,6 +1057,18 @@ export default function WholesaleBilling({ isYearLocked = false }) {
                     </div>
                 </div>
             )}
+
+            {/* Cancel Wholesale Bill Modal */}
+            <CancelBillModal
+                isOpen={cancelModal.show}
+                bill={cancelModal.bill}
+                billType="wholesale"
+                onClose={() => setCancelModal({ show: false, bill: null })}
+                onSuccess={(res) => {
+                    showToast(`Wholesale Bill ${res.bill_number} cancelled successfully! Accounts reversed.`, 'success');
+                    loadHistory(historyPage);
+                }}
+            />
 
             </div>
             

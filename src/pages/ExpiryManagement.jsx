@@ -21,7 +21,8 @@ export default function ExpiryManagement() {
   }, [daysFilter])
 
   const getUrgencyColor = (month, year) => {
-    const expiry = new Date(year, month - 1, 1)
+    const fullYear = year < 100 ? year + 2000 : year
+    const expiry = new Date(fullYear, month - 1, 1)
     const today = new Date()
     const diffDays = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24))
     
@@ -31,7 +32,8 @@ export default function ExpiryManagement() {
   }
 
   const getUrgencyTextColor = (month, year) => {
-    const expiry = new Date(year, month - 1, 1)
+    const fullYear = year < 100 ? year + 2000 : year
+    const expiry = new Date(fullYear, month - 1, 1)
     const today = new Date()
     const diffDays = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24))
     

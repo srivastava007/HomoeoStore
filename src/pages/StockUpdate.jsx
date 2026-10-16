@@ -1,94 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-
-function AutocompleteDropdown({ value, onChange, options, onEnter, placeholder, id, inputStyle, maxItems = 50 }) {
-    const [show, setShow] = useState(false)
-    const [focusedIdx, setFocusedIdx] = useState(0)
-
-    const filtered = show ? options.filter(o => {
-        const searchStr = (o.name || '').toLowerCase();
-        const searchTerms = String(value||'').toLowerCase().split(/\s+/).filter(Boolean);
-        return searchTerms.every(term => searchStr.includes(term));
-    }).slice(0, maxItems) : []
-
-    function handleKeyDown(e) {
-        if (!show) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                onEnter();
-            }
-            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                setShow(true);
-            }
-            return
-        }
-        if (e.key === 'ArrowDown') {
-            e.preventDefault()
-            setFocusedIdx(prev => prev < filtered.length - 1 ? prev + 1 : prev)
-        } else if (e.key === 'ArrowUp') {
-            e.preventDefault()
-            setFocusedIdx(prev => prev > 0 ? prev - 1 : prev)
-        } else if (e.key === 'Enter') {
-            e.preventDefault()
-            if (focusedIdx >= 0 && focusedIdx < filtered.length) {
-                onChange(filtered[focusedIdx].name)
-                setShow(false)
-                setFocusedIdx(-1)
-                setTimeout(onEnter, 50)
-            } else {
-                setShow(false)
-                onEnter()
-            }
-        } else if (e.key === 'Escape') {
-            setShow(false)
-            setFocusedIdx(0)
-        }
-    }
-
-    return (
-        <div style={{ position: 'relative', width: '100%' }}>
-            <input 
-                id={id}
-                style={{...inputStyle, padding: '4px 8px', fontSize: '12px', height: '30px', borderRadius: '4px', border: '1px solid #cbd5e1', transition: 'all 0.2s'}}
-                value={value}
-                onChange={e => { onChange(e.target.value); setShow(true); setFocusedIdx(0); }}
-                onFocus={() => { setShow(true); setFocusedIdx(0); }}
-                onBlur={() => setTimeout(() => setShow(false), 200)}
-                onKeyDown={handleKeyDown}
-                placeholder={placeholder}
-                autoComplete="off"
-            />
-            {show && filtered.length > 0 && (
-                <div style={{
-                    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 9999,
-                    background: '#fff', border: '1px solid #cbd5e1', borderRadius: '8px',
-                    maxHeight: '200px', overflowY: 'auto', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05)',
-                    marginTop: '4px'
-                }}>
-                    {filtered.map((opt, idx) => (
-                        <div
-                            key={idx}
-                            onClick={() => {
-                                onChange(opt.name)
-                                setShow(false)
-                                setTimeout(onEnter, 50)
-                            }}
-                            onMouseEnter={() => setFocusedIdx(idx)}
-                            style={{
-                                padding: '10px 14px', fontSize: '14px', cursor: 'pointer',
-                                fontFamily: 'Outfit, sans-serif', borderBottom: '1px solid #f8fafc',
-                                background: focusedIdx === idx ? '#f0fdf4' : '#fff',
-                                color: focusedIdx === idx ? '#16a34a' : '#1e293b',
-                                fontWeight: focusedIdx === idx ? '600' : '500'
-                            }}
-                        >
-                            {opt.name}
-                        </div>
-                    ))}
-                </div>
-            )}
-        </div>
-    )
-}
+import AutocompleteDropdown from '../components/AutocompleteDropdown'
 
 export default function StockUpdate() {
     const [medicines, setMedicines] = useState([])
@@ -299,6 +210,32 @@ export default function StockUpdate() {
 
     useEffect(() => { load() }, [])
 
+    async function loadBatchesOnly() {
+        try {
+            const batches = await window.api.getAllStockBatches()
+            const mappedBatches = (batches || []).map(b => ({
+                id: b.id,
+                company: b.company,
+                medicine: b.medicine_name,
+                medicine_id: b.medicine_id,
+                type: b.category,
+                power: b.potency,
+                packing: b.unit,
+                qty: b.quantity,
+                batch: b.batch_no,
+                expMonth: b.expiry_month,
+                expYear: b.expiry_year,
+                mrp: b.mrp,
+                godown: b.godown,
+                locationType: b.location_type,
+                locationValue: b.location_value
+            }))
+            setAllBatches(mappedBatches)
+        } catch (err) {
+            console.error("Failed to load batches", err)
+        }
+    }
+
     // Resolve precise medicine_id based on selected Name, Type, Packing, Power
     const resolvedMedId = useMemo(() => {
         if (currentEntry.medicine) {
@@ -354,19 +291,10 @@ export default function StockUpdate() {
         const searchTerms = search.toLowerCase().split(' ').filter(t => t.trim() !== '')
         
         return medicines.filter(m => {
-            const matchesCompany = companyLower ? m.companyLower === companyLower : true
-            
-            const matchesSearch = searchTerms.length === 0 ? true : searchTerms.every(term => {
-                if (m._searchKey) return m._searchKey.includes(term);
-                const inName = (m.name || '').toLowerCase().includes(term)
-                const inPotency = (m.potency || '').toLowerCase().includes(term)
-                const isPureNumber = /^\d+$/.test(term)
-                const inUnit = !isPureNumber && (m.unit || '').toLowerCase().includes(term)
-                return inName || inPotency || inUnit
-            })
-            
-            return matchesCompany && matchesSearch
-        })
+            if (companyLower && m.companyLower !== companyLower) return false
+            if (searchTerms.length === 0) return true
+            return searchTerms.every(t => m._searchKey?.includes(t))
+        }).slice(0, 1000)
     }, [showSearch, medicines, currentEntry.company, search])
 
     // Grid search filter based on current godown and location
@@ -493,15 +421,27 @@ export default function StockUpdate() {
             location_value: currentEntry.locationValue
         }
 
+        let newStock = null;
         try {
             if (transactionMode === 'alter' && editingBatchId) {
-                await window.api.updateStockBatch({ id: editingBatchId, ...batchData })
+                const res = await window.api.updateStockBatch({ id: editingBatchId, ...batchData })
+                newStock = res.new_stock;
                 setEditingBatchId(null)
             } else {
-                await window.api.addStockBatch(batchData)
+                const res = await window.api.addStockBatch(batchData)
+                newStock = res.new_stock;
             }
         } catch (err) {
             return showError('Error saving batch: ' + (err.message || err))
+        }
+
+        if (newStock !== null && newStock !== undefined) {
+            setMedicines(prev => {
+                const newArr = [...prev];
+                const idx = newArr.findIndex(m => m.id === currentEntry.medicine_id);
+                if (idx !== -1) newArr[idx] = { ...newArr[idx], stock_quantity: newStock };
+                return newArr;
+            });
         }
 
         // Refresh batches for selected medicine
@@ -509,8 +449,8 @@ export default function StockUpdate() {
             window.api.getStockBatches(selectedMed.id).then(b => setMedicineBatches(b || []))
         }
 
-        // Reload medicines and all batches for updated stock
-        await load()
+        // Reload only batches to prevent massive UI re-render and lag
+        loadBatchesOnly().catch(e => console.error(e))
 
         // Reset entry fields (keep company and location context)
         setCurrentEntry({
@@ -565,14 +505,22 @@ export default function StockUpdate() {
 
     async function removeItem(id) {
         try {
-            await window.api.deleteStockBatch(id)
+            const res = await window.api.deleteStockBatch(id)
+            if (res && res.new_stock !== undefined && res.medicine_id) {
+                setMedicines(prev => {
+                    const newArr = [...prev];
+                    const idx = newArr.findIndex(m => m.id === res.medicine_id);
+                    if (idx !== -1) newArr[idx] = { ...newArr[idx], stock_quantity: res.new_stock };
+                    return newArr;
+                });
+            }
         } catch (err) {
             showError('Error deleting: ' + err.message)
         }
         if (selectedMed) {
             window.api.getStockBatches(selectedMed.id).then(b => setMedicineBatches(b || []))
         }
-        await load()
+        await loadBatchesOnly()
     }
 
     function handleCancel() {

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts'
+import { useState, useEffect, useMemo } from 'react'
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, LabelList } from 'recharts'
 import './Dashboard.css'
 
 function StatCard({ label, value, sub, color, icon, isPrivate }) {
@@ -57,6 +57,37 @@ function SalesAnalyticsChart({ data }) {
     setMounted(true);
   }, []);
 
+  // Ensure all 7 continuous days (today and past 6 days) are represented
+  const chartData = useMemo(() => {
+    const map = new Map();
+    if (Array.isArray(data)) {
+      data.forEach(item => {
+        if (item && item.date) {
+          map.set(item.date, Number(item.revenue) || 0);
+        }
+      });
+    }
+
+    const result = [];
+    const now = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const dateKey = `${yyyy}-${mm}-${dd}`;
+
+      result.push({
+        date: dateKey,
+        revenue: map.has(dateKey) ? map.get(dateKey) : 0,
+        dayLabel: d.toLocaleDateString('en-IN', { weekday: 'short' }),
+        dateLabel: `${d.getDate()}/${d.getMonth() + 1}`,
+        fullDateStr: d.toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric' })
+      });
+    }
+    return result;
+  }, [data]);
+
   return (
     <div className="dashboard-panel flex-1-5">
       <div className="panel-header large-margin">
@@ -66,20 +97,58 @@ function SalesAnalyticsChart({ data }) {
       <div className="chart-wrapper">
         {mounted && (
           <ResponsiveContainer width="99%" height={320}>
-            <LineChart data={data} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
+            <LineChart data={chartData} margin={{ top: 15, right: 25, left: 10, bottom: 10 }}>
               <defs>
                 <filter id="shadow" height="200%">
                   <feDropShadow dx="0" dy="8" stdDeviation="8" floodColor="#3b82f6" floodOpacity="0.3"/>
                 </filter>
               </defs>
               <CartesianGrid strokeDasharray="4 4" vertical={false} stroke="#f1f5f9" />
-              <XAxis dataKey="date" tick={{fontSize: 13, fill: '#64748b', fontWeight: 600, fontFamily: 'Outfit'}} tickFormatter={(str) => {
-                  const d = new Date(str);
-                  return `${d.getDate()}/${d.getMonth()+1}`;
-              }} axisLine={false} tickLine={false} dy={10} />
-              <YAxis tick={{fontSize: 13, fill: '#64748b', fontWeight: 600, fontFamily: 'Outfit'}} axisLine={false} tickLine={false} tickFormatter={v => `₹${v}`} dx={-10} />
-              <RechartsTooltip contentStyle={{ borderRadius: '20px', border: '1px solid rgba(255,255,255,0.6)', boxShadow: '0 10px 30px -5px rgba(0,0,0,0.1)', background: 'rgba(255,255,255,0.6)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', padding: '16px', fontWeight: '700', fontFamily: 'Outfit', color: '#0f172a' }} formatter={(val) => [`₹${val}`, 'Revenue']} labelFormatter={(l) => new Date(l).toLocaleDateString('en-IN', {weekday: 'short', month: 'short', day: 'numeric'})} />
-              <Line type="monotone" dataKey="revenue" stroke="#3b82f6" strokeWidth={5} filter="url(#shadow)" dot={{r:6, fill: '#ffffff', strokeWidth: 3, stroke: '#3b82f6'}} activeDot={{r: 8, fill: '#3b82f6', strokeWidth: 4, stroke: '#fff', filter: 'drop-shadow(0 0 12px rgba(59,130,246,0.9))'}} />
+              <XAxis 
+                dataKey="dateLabel" 
+                interval={0}
+                tick={{fontSize: 12, fill: '#64748b', fontWeight: 600, fontFamily: 'Outfit'}} 
+                axisLine={false} 
+                tickLine={false} 
+                dy={8} 
+              />
+              <YAxis 
+                width={70}
+                tick={{fontSize: 12, fill: '#64748b', fontWeight: 600, fontFamily: 'Outfit'}} 
+                axisLine={false} 
+                tickLine={false} 
+                tickFormatter={v => `₹${Number(v).toLocaleString('en-IN')}`} 
+              />
+              <RechartsTooltip 
+                contentStyle={{ 
+                  borderRadius: '20px', 
+                  border: '1px solid rgba(255,255,255,0.6)', 
+                  boxShadow: '0 10px 30px -5px rgba(0,0,0,0.1)', 
+                  background: 'rgba(255,255,255,0.9)', 
+                  backdropFilter: 'blur(16px)', 
+                  WebkitBackdropFilter: 'blur(16px)', 
+                  padding: '14px 18px', 
+                  fontWeight: '700', 
+                  fontFamily: 'Outfit', 
+                  color: '#0f172a' 
+                }} 
+                formatter={(val) => [`₹${Number(val).toLocaleString('en-IN')}`, 'Revenue']} 
+                labelFormatter={(label, payload) => {
+                  if (payload && payload[0] && payload[0].payload) {
+                    return payload[0].payload.fullDateStr;
+                  }
+                  return label;
+                }} 
+              />
+              <Line 
+                type="monotone" 
+                dataKey="revenue" 
+                stroke="#3b82f6" 
+                strokeWidth={5} 
+                filter="url(#shadow)" 
+                dot={{r: 6, fill: '#ffffff', strokeWidth: 3, stroke: '#3b82f6'}} 
+                activeDot={{r: 8, fill: '#3b82f6', strokeWidth: 4, stroke: '#fff', filter: 'drop-shadow(0 0 12px rgba(59,130,246,0.9))'}} 
+              />
             </LineChart>
           </ResponsiveContainer>
         )}
@@ -89,12 +158,17 @@ function SalesAnalyticsChart({ data }) {
 }
 
 function TopSellingChart({ data }) {
-  const chartData = data.map(m => ({...m, displayName: `${m.name} ${m.potency} ${m.company ? `(${m.company})` : ''}`.trim()}));
+  const chartData = (data || []).map(m => ({
+    ...m, 
+    displayName: `${m.name} ${m.potency || ''} ${m.company ? `(${m.company})` : ''}`.trim()
+  }));
   
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  const maxQty = Math.max(...chartData.map(d => Number(d.total_qty) || 0), 1);
 
   return (
     <div className="dashboard-panel">
@@ -105,7 +179,7 @@ function TopSellingChart({ data }) {
       <div className="chart-wrapper">
         {mounted && (
           <ResponsiveContainer width="99%" height={320}>
-            <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+            <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 45, left: 10, bottom: 5 }}>
               <defs>
                 <linearGradient id="barGrad" x1="0" y1="0" x2="1" y2="0">
                   <stop offset="0%" stopColor="#10b981" />
@@ -113,10 +187,35 @@ function TopSellingChart({ data }) {
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="4 4" horizontal={false} stroke="#f1f5f9" />
-              <XAxis type="number" hide />
-              <YAxis type="category" dataKey="displayName" width={140} tick={{fontSize: 13, fill: '#64748b', fontWeight: 600, fontFamily: 'Outfit'}} axisLine={false} tickLine={false} dx={-10} />
-              <RechartsTooltip contentStyle={{ borderRadius: '20px', border: '1px solid rgba(255,255,255,0.6)', boxShadow: '0 10px 30px -5px rgba(0,0,0,0.1)', background: 'rgba(255,255,255,0.6)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', padding: '12px 16px', fontWeight: '700', fontFamily: 'Outfit', color: '#0f172a' }} cursor={{fill: 'rgba(255, 255, 255, 0.4)', rx: 12}} formatter={(val) => [val, 'Qty Sold']} />
-              <Bar dataKey="total_qty" fill="url(#barGrad)" radius={[0, 12, 12, 0]} barSize={32} />
+              <XAxis type="number" domain={[0, Math.ceil(maxQty * 1.3)]} hide />
+              <YAxis 
+                type="category" 
+                dataKey="displayName" 
+                width={150} 
+                tick={{fontSize: 12, fill: '#64748b', fontWeight: 600, fontFamily: 'Outfit'}} 
+                axisLine={false} 
+                tickLine={false} 
+                tickFormatter={v => v.length > 20 ? `${v.substring(0, 18)}…` : v}
+              />
+              <RechartsTooltip 
+                contentStyle={{ 
+                  borderRadius: '20px', 
+                  border: '1px solid rgba(255,255,255,0.6)', 
+                  boxShadow: '0 10px 30px -5px rgba(0,0,0,0.1)', 
+                  background: 'rgba(255,255,255,0.9)', 
+                  backdropFilter: 'blur(16px)', 
+                  WebkitBackdropFilter: 'blur(16px)', 
+                  padding: '12px 16px', 
+                  fontWeight: '700', 
+                  fontFamily: 'Outfit', 
+                  color: '#0f172a' 
+                }} 
+                cursor={{fill: 'rgba(255, 255, 255, 0.4)', rx: 12}} 
+                formatter={(val) => [`${val} pcs`, 'Qty Sold']} 
+              />
+              <Bar dataKey="total_qty" fill="url(#barGrad)" radius={[0, 10, 10, 0]} barSize={28}>
+                <LabelList dataKey="total_qty" position="right" fill="#059669" fontSize={12} fontWeight={700} formatter={v => `${v} sold`} />
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         )}
@@ -148,6 +247,7 @@ function LowStockPanel({ items, onNavigate }) {
             <thead>
               <tr>
                 <th className="text-left">Medicine</th>
+                <th className="text-left">Company</th>
                 <th className="text-left">Potency</th>
                 <th className="text-right">Stock</th>
                 <th className="text-right">Min</th>
@@ -157,6 +257,7 @@ function LowStockPanel({ items, onNavigate }) {
               {items.map(m => (
                 <tr key={m.id} className="dashboard-table-row">
                   <td className="medicine-name">{m.name}</td>
+                  <td className="medicine-company" title={m.company || ''}>{m.company || '—'}</td>
                   <td className="color-muted">{m.potency || '—'}</td>
                   <td className="text-right">
                     <span className={m.stock_quantity === 0 ? 'badge-stock-danger' : 'badge-stock-warning'}>

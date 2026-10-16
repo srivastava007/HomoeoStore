@@ -381,7 +381,7 @@
 }
 
 .dashboard-table th {
-  padding: 0 16px 12px;
+  padding: 0 14px 12px;
   font-weight: 700;
   color: #64748b;
   font-size: 12px;
@@ -408,7 +408,7 @@
 }
 
 .dashboard-table td {
-  padding: 18px 16px;
+  padding: 16px 14px;
 }
 
 .dashboard-table td:first-child { border-radius: 16px 0 0 16px; }
@@ -417,6 +417,16 @@
 .dashboard-table .medicine-name {
   font-weight: 700;
   color: #1e293b;
+}
+
+.dashboard-table .medicine-company {
+  color: #475569;
+  font-weight: 600;
+  font-size: 13px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dashboard-table .medicine-potency {

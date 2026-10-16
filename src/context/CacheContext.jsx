@@ -34,7 +34,7 @@ export function CacheProvider({ children }) {
           ...item,
           nameLower: name.toLowerCase(),
           companyLower: company.toLowerCase(),
-          _searchKey: `${name} ${potency} ${company} ${unit}`.toLowerCase()
+          _searchKey: `${name} ${potency} ${company}`.toLowerCase()
         };
       });
       setMedicines(processed);
@@ -193,6 +193,31 @@ export function CacheProvider({ children }) {
     refreshStoreProfile
   ]);
 
+
+  useEffect(() => {
+    let unlisten = null;
+    if (window.api && window.api.onDatabaseChanged) {
+      unlisten = window.api.onDatabaseChanged((action) => {
+        console.log(`[CacheContext] Database changed remotely: ${action}`);
+        if (action.includes('Medicine') || action.includes('StockBatch')) {
+          refreshMedicines();
+        }
+        if (action.includes('Company')) refreshCompanies();
+        if (action.includes('Godown')) refreshGodowns();
+        if (action.includes('Supplier')) refreshSuppliers();
+        if (action.includes('Category')) refreshCategories();
+        if (action.includes('Power')) refreshPowers();
+        if (action.includes('Packing')) refreshPackings();
+        if (action.includes('Ledger') || action.includes('Account')) refreshLedgers();
+      });
+    }
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [
+    refreshMedicines, refreshCompanies, refreshGodowns, refreshSuppliers, 
+    refreshCategories, refreshPowers, refreshPackings, refreshLedgers
+  ]);
 
   return (
     <CacheContext.Provider value={{

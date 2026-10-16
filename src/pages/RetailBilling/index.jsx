@@ -2,6 +2,12 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import AutocompleteDropdown from '../../components/AutocompleteDropdown'
 import DateInput from '../../components/DateInput'
 import { useCache } from '../../context/CacheContext'
+import ClearConfirmModal from './Modals/ClearConfirmModal'
+import HeldBillsModal from './Modals/HeldBillsModal'
+import SuccessModal from './Modals/SuccessModal'
+import CancelBillModal from '../../components/CancelBillModal'
+import { numberToWords, formatInvoiceDate, formatCurrency } from '../../utils/billingUtils'
+
 
 export default function Billing({ isYearLocked = false }) {
     const {
@@ -56,8 +62,8 @@ export default function Billing({ isYearLocked = false }) {
         packing: '',
         qty: '',
         price: '',
-        disPercent: 10,
-        gstPercent: 5,
+        disPercent: '10',
+        gstPercent: '',
         batch: '',
         gid: '',
         location: '',
@@ -84,13 +90,19 @@ export default function Billing({ isYearLocked = false }) {
     }
 
     // Success Modal State
-    const [successModal, setSuccessModal] = useState({ show: false, billNo: '', billId: null })
+    const [successModal, setSuccessModal] = useState({ show: false, billNo: '', billId: null, isEdit: false })
     const [successFocus, setSuccessFocus] = useState('ok')
     const isLocked = isYearLocked
+
+    // Edit Mode State
+    const [editingBillId, setEditingBillId] = useState(null)
+    const [editingBillNumber, setEditingBillNumber] = useState('')
+    const [editingBillDate, setEditingBillDate] = useState('')
 
     const [heldBills, setHeldBills] = useState([])
     const [showHeldModal, setShowHeldModal] = useState(false)
     const [showClearConfirm, setShowClearConfirm] = useState(false)
+    const [cancelModal, setCancelModal] = useState({ show: false, bill: null })
 
     useEffect(() => {
         try {
@@ -110,6 +122,52 @@ export default function Billing({ isYearLocked = false }) {
 
 
     useEffect(() => { load() }, [])
+
+    // Real-time listener for currentEntry stock updates
+    useEffect(() => {
+        let unlisten = null;
+        if (window.api && window.api.onDatabaseChanged) {
+            unlisten = window.api.onDatabaseChanged(async (action) => {
+                if (action.includes('StockBatch') && currentEntry.medicine_id) {
+                    try {
+                        const batches = await window.api.getStockBatches(currentEntry.medicine_id);
+                        
+                        let unassignedCartQty = items
+                            .filter(item => item.medicine_id === currentEntry.medicine_id && !item.batch_id)
+                            .reduce((sum, item) => sum + (Number(item.qty) || 0), 0);
+                            
+                        const liveBatches = (batches || []).map(b => {
+                            const batchCartQty = items
+                                .filter(item => item.batch_id === b.id)
+                                .reduce((sum, item) => sum + (Number(item.qty) || 0), 0);
+                            let available = Math.max(0, (b.quantity || 0) - batchCartQty);
+                            const deduct = Math.min(available, unassignedCartQty);
+                            available -= deduct;
+                            unassignedCartQty -= deduct;
+                            return { ...b, quantity: available };
+                        });
+                        
+                        const validBatches = liveBatches.filter(b => b.quantity > 0);
+                        const totalAvailable = validBatches.reduce((sum, b) => sum + b.quantity, 0);
+                        
+                        setCurrentEntry(prev => ({
+                            ...prev,
+                            stock: totalAvailable
+                        }));
+                        
+                        if (batchModalOpen) {
+                            setAvailableBatches(validBatches);
+                        }
+                    } catch (err) {
+                        console.error('[RetailBilling] Failed to auto-refresh stock:', err);
+                    }
+                }
+            });
+        }
+        return () => {
+            if (unlisten) unlisten();
+        };
+    }, [currentEntry.medicine_id, items, batchModalOpen]);
 
     // ─── Direct PDF Invoicing Pipeline ───
     async function triggerInvoicePrint(billId, enrichFromActiveForm = false) {
@@ -352,34 +410,6 @@ export default function Billing({ isYearLocked = false }) {
         }
     }, [triggerPrint, printBillData])
 
-    function numberToWords(num) {
-        const a = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-        const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-        
-        if ((num = num.toString()).length > 9) return 'overflow';
-        let n = ('000000000' + num).substr(-9).match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
-        if (!n) return '';
-        let str = '';
-        str += (Number(n[1]) != 0) ? (a[Number(n[1])] || b[n[1][0]] + ' ' + a[n[1][1]]) + ' Crore ' : '';
-        str += (Number(n[2]) != 0) ? (a[Number(n[2])] || b[n[2][0]] + ' ' + a[n[2][1]]) + ' Lakh ' : '';
-        str += (Number(n[3]) != 0) ? (a[Number(n[3])] || b[n[3][0]] + ' ' + a[n[3][1]]) + ' Thousand ' : '';
-        str += (Number(n[4]) != 0) ? (a[Number(n[4])] || b[n[4][0]] + ' ' + a[n[4][1]]) + ' Hundred ' : '';
-        str += (Number(n[5]) != 0) ? ((str != '') ? 'and ' : '') + (a[Number(n[5])] || b[n[5][0]] + ' ' + a[n[5][1]]) + ' Only' : 'Only';
-        return str;
-    }
-
-    const formatInvoiceDate = (dateStr) => {
-        if (!dateStr) return '';
-        let dStr = typeof dateStr === 'string' && !dateStr.includes('T') ? dateStr.replace(' ', 'T') + 'Z' : dateStr;
-        const dateObj = new Date(dStr);
-        if (isNaN(dateObj.getTime())) return dateStr;
-        return dateObj.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase();
-    }
-
-    const formatCurrency = (num) => {
-        return `₹${(Number(num) || 0).toFixed(2)}`;
-    }
-
 
     // Scroll to focused medicine item
     useEffect(() => {
@@ -460,16 +490,6 @@ export default function Billing({ isYearLocked = false }) {
             if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
                 e.preventDefault();
                 setSuccessFocus(prev => prev === 'ok' ? 'print' : 'ok');
-            } else if (e.key === 'Enter') {
-                e.preventDefault();
-                const tempId = successModal.billId;
-                if (successFocus === 'print') {
-                    setSuccessModal({ show: false, billNo: '', billId: null });
-                    if (tempId) triggerInvoicePrint(tempId, true);
-                } else {
-                    setSuccessModal({ show: false, billNo: '', billId: null });
-                }
-                setTimeout(() => document.getElementById('billing-company-input')?.focus(), 100);
             } else if (e.key === 'Escape') {
                 e.preventDefault();
                 setSuccessModal({ show: false, billNo: '', billId: null });
@@ -481,7 +501,20 @@ export default function Billing({ isYearLocked = false }) {
         return () => {
             window.removeEventListener('keydown', handleSuccessKeyDown);
         };
-    }, [successModal, successFocus]);
+    }, [successModal]);
+
+    // Auto-focus active button in Success Modal to enable native Enter/Space triggers
+    useEffect(() => {
+        if (successModal.show) {
+            setTimeout(() => {
+                if (successFocus === 'print') {
+                    document.getElementById('billing-print-btn')?.focus();
+                } else {
+                    document.getElementById('billing-ok-btn')?.focus();
+                }
+            }, 50);
+        }
+    }, [successModal.show, successFocus]);
 
 
     // Global keydown event listener for View Bill Modal (History)
@@ -603,15 +636,14 @@ export default function Billing({ isYearLocked = false }) {
             setFocusedBatchIndex(0)
             setBatchModalOpen(true)
         } else {
-            showToast('Out of stock! No locations found.', 'error')
-            // Clear the medicine selection
-            setSearch('')
-            setSelectedMed(null)
-            setCurrentEntry({ ...currentEntry, medicine: '', type: '', packing: '', power: '', qty: '', price: '', disPercent: 10, gstPercent: 5 })
-            setShowSearch(true)
-            // Don't move to Qty if out of stock. Go back to medicine search.
+            showToast('Out of stock!', 'warning')
+            setCurrentEntry(prev => ({
+                ...prev,
+                batch_id: null,
+                batch: ''
+            }))
             setTimeout(() => {
-                document.getElementById('billing-medicine-input')?.focus()
+                document.getElementById('billing-qty-input')?.focus()
             }, 50)
         }
     }
@@ -642,6 +674,7 @@ export default function Billing({ isYearLocked = false }) {
     }
 
     function handleHoldBill() {
+        if (editingBillId) return showToast('Cannot put a bill on hold while in Edit Mode. Cancel or Update first.', 'error');
         if (items.length === 0) return showToast('Cannot hold an empty bill', 'error');
         const newHold = {
             id: Date.now(),
@@ -656,7 +689,7 @@ export default function Billing({ isYearLocked = false }) {
         setItems([]);
         setBillDetails({ patientName: 'CASH', address: '-', prescribedBy: 'Self', discountRs: 0, otherCharges: 0, otherChargesType: 'E' });
         setCurrentEntry({
-            company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: 10, gstPercent: 5, batch: '', gid: '', location: '', stock: 0
+            company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: '10', gstPercent: '', batch: '', gid: '', location: '', stock: 0
         });
         localStorage.removeItem('retailDraft');
         showToast('Bill put on hold', 'success');
@@ -664,6 +697,7 @@ export default function Billing({ isYearLocked = false }) {
     }
 
     function handleRestoreBill(holdId) {
+        if (editingBillId) return showToast('Cannot restore while in Edit Mode. Cancel edit first.', 'error');
         if (items.length > 0) return showToast('Please clear or hold the current bill first', 'error');
         
         const holdIndex = heldBills.findIndex(h => h.id === holdId);
@@ -700,9 +734,10 @@ export default function Billing({ isYearLocked = false }) {
         if (qty <= 0) return showToast('Please enter a valid quantity', 'error')
         const disPercent = Number(currentEntry.disPercent) || 0
         
+        const isLoose = (currentEntry.saleType === 'Loose');
         if (currentEntry.batch_id && qty > currentEntry.stock) {
             return showToast(`Cannot add ${qty}. Only ${currentEntry.stock} available in this location/batch!`, 'error')
-        } else if (!currentEntry.batch_id && currentEntry.stock !== undefined && qty > currentEntry.stock) {
+        } else if (!isLoose && !currentEntry.batch_id && currentEntry.stock !== undefined && qty > currentEntry.stock) {
             return showToast(`Cannot add ${qty}. Only ${currentEntry.stock} available in stock!`, 'error')
         }
 
@@ -720,6 +755,7 @@ export default function Billing({ isYearLocked = false }) {
         setItems([...items, newItem])
         
         // Reset entry but keep company and saleType for continuous fast entry
+        const nextLoose = (currentEntry.saleType === 'Loose');
         setCurrentEntry({
             ...currentEntry,
             medicine: '',
@@ -732,10 +768,11 @@ export default function Billing({ isYearLocked = false }) {
             stock: 0,
             batch: '',
             batch_id: null,
-            skip_batch_selection: false,
+            skip_batch_selection: nextLoose,
             gid: '',
-            location: '',
-            gstPercent: 5
+            location: nextLoose ? 'Loose' : '',
+            gstPercent: 5,
+            disPercent: '10'
         })
         setSearch('')
         setSelectedMed(null)
@@ -752,6 +789,8 @@ export default function Billing({ isYearLocked = false }) {
             .reduce((sum, item) => sum + (Number(item.qty) || 0), 0);
         const remainingStock = Math.max(0, (m.stock_quantity || 0) - cartQty);
 
+        const isLoose = (currentEntry.saleType === 'Loose');
+
         setCurrentEntry({
             ...currentEntry,
             company: m.company || '',
@@ -760,20 +799,28 @@ export default function Billing({ isYearLocked = false }) {
             type: m.category || '',
             packing: m.unit || '',
             power: m.potency || '',
-            price: Number(m.selling_price || 0).toFixed(2),
-            qty: 1,
+            price: '',
+            qty: '',
+            disPercent: '10',
             stock: remainingStock,
             batch_id: null,
-            location: '',
-            skip_batch_selection: false,
+            location: isLoose ? 'Loose' : '',
+            skip_batch_selection: isLoose,
             gstPercent: m.gst_rate !== undefined ? m.gst_rate : 5
         })
         setSearch(m.name)
         setShowSearch(false)
         setSelectedMed(m)
         
-        // Always pop up locations immediately
-        handleViewLocations(m.id);
+        if (!isLoose) {
+            // Always pop up locations immediately if NOT loose
+            handleViewLocations(m.id);
+        } else {
+            // Focus directly to quantity input for Loose items
+            setTimeout(() => {
+                document.getElementById('billing-qty-input')?.focus();
+            }, 50);
+        }
     }
 
     // Removed handleCompanyKeyDown
@@ -819,39 +866,193 @@ export default function Billing({ isYearLocked = false }) {
         setItems(items.filter(i => i.id !== id))
     }
 
-    async function handleBill() {
-        if (isLocked) return showToast('Financial Year is locked', 'error')
-        if (items.length === 0) return showToast('Add at least one item', 'error')
-        const bill_number = nextBillNumberStr
+    function editCartItem(index) {
+        const itemToEdit = items[index]
+        if (!itemToEdit) return
         
-        const billId = await window.api.createBill({
-            bill_number,
-            customer_name: billDetails.patientName,
-            customer_phone: '',
-            total_amount: finalTotal,
-            discount: totalDiscountAmount,
-            paid_amount: finalTotal,
-            items: items.map(i => ({
-                medicine_id: i.medicine_id || null,
-                batch_id: i.batch_id || null,
-                quantity: i.qty,
-                unit_price: i.price,
-                total_price: i.amount,
-                gst_rate: i.gstPercent !== undefined ? i.gstPercent : 5
-            }))
+        setItems(items.filter((_, idx) => idx !== index))
+        setCurrentEntry({
+            company: itemToEdit.company || '',
+            medicine: itemToEdit.medicine || '',
+            medicine_id: itemToEdit.medicine_id || null,
+            type: itemToEdit.type || '',
+            saleType: itemToEdit.saleType || 'Sealed',
+            power: itemToEdit.power || '',
+            packing: itemToEdit.packing || '',
+            qty: String(itemToEdit.qty),
+            price: String(itemToEdit.price),
+            disPercent: String(itemToEdit.disPercent),
+            gstPercent: itemToEdit.gstPercent !== undefined ? itemToEdit.gstPercent : 5,
+            batch: itemToEdit.batch || '',
+            batch_id: itemToEdit.batch_id || null,
+            gid: itemToEdit.gid || '',
+            location: itemToEdit.location || '',
+            stock: itemToEdit.stock || 0,
+            skip_batch_selection: itemToEdit.saleType === 'Loose'
         })
+        setSearch(itemToEdit.medicine || '')
         
+        setTimeout(() => {
+            document.getElementById('billing-qty-input')?.focus()
+        }, 50)
+    }
+
+    function cancelEdit() {
+        setEditingBillId(null)
+        setEditingBillNumber('')
+        setEditingBillDate('')
         setItems([])
         setBillDetails({ patientName: 'CASH', address: '-', prescribedBy: 'Self', discountRs: 0, otherCharges: 0, otherChargesType: 'E' })
         setCurrentEntry({
-            company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: 10, gstPercent: 5, batch: '', gid: '', location: '', stock: 0
+            company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: '10', gstPercent: '', batch: '', gid: '', location: '', stock: 0
         })
         setSelectedMed(null)
         setSearch('')
-        load()
-        refreshMedicines()
-        setSuccessModal({ show: true, billNo: bill_number, billId })
+        showToast('Edit mode cancelled', 'success')
+        setTimeout(() => {
+            document.getElementById('billing-company-input')?.focus()
+        }, 50)
+    }
 
+    async function handleEditBill(billId) {
+        if (isLocked) return showToast('Financial Year is locked. Cannot edit bills.', 'error')
+        try {
+            const bill = await window.api.getBillById(billId)
+            if (!bill) return showToast('Bill not found', 'error')
+
+            const mappedItems = (bill.items || []).map((item, idx) => {
+                const qty = Number(item.quantity) || 0
+                const unitPrice = Number(item.unit_price) || 0
+                const totalPrice = Number(item.total_price) || 0
+                const gross = unitPrice * qty
+                const disAmount = Math.max(0, gross - totalPrice)
+                const disPercent = gross > 0 ? String(Math.round((disAmount / gross) * 100)) : '0'
+                const isLoose = !item.batch_id
+
+                return {
+                    id: Date.now() + idx,
+                    company: item.company || '',
+                    medicine: item.medicine_name || '',
+                    medicine_id: item.medicine_id,
+                    type: item.category || '',
+                    saleType: isLoose ? 'Loose' : 'Sealed',
+                    power: item.potency || '',
+                    packing: item.unit || '',
+                    qty: qty,
+                    price: unitPrice.toFixed(2),
+                    disPercent: disPercent,
+                    gstPercent: item.gst_rate !== undefined ? item.gst_rate : 5,
+                    batch: item.batch_no || '',
+                    batch_id: item.batch_id || null,
+                    gid: item.godown || '',
+                    location: item.location_value || (isLoose ? 'Loose' : ''),
+                    stock: (item.batch_stock !== undefined ? Number(item.batch_stock) : 0) + qty,
+                    amount: totalPrice,
+                    disAmount: disAmount
+                }
+            })
+
+            const sumItemDiscounts = mappedItems.reduce((sum, it) => sum + (Number(it.disAmount) || 0), 0)
+            const overallDis = Number(bill.discount) || 0
+            const billDiscountRs = overallDis > sumItemDiscounts ? Math.round(overallDis - sumItemDiscounts) : 0
+
+            setEditingBillId(bill.id)
+            setEditingBillNumber(bill.bill_number)
+            setEditingBillDate(bill.created_at)
+
+            setBillDetails({
+                patientName: bill.customer_name || 'CASH',
+                address: bill.address || '-',
+                prescribedBy: bill.prescribed_by || 'Self',
+                discountRs: billDiscountRs,
+                otherCharges: 0,
+                otherChargesType: 'E'
+            })
+
+            setItems(mappedItems)
+            setView('new')
+            showToast(`Loaded Bill ${bill.bill_number} for editing`, 'success')
+            setTimeout(() => {
+                document.getElementById('billing-company-input')?.focus()
+            }, 100)
+        } catch (err) {
+            console.error('Failed to load bill for editing:', err)
+            showToast(err.message || 'Failed to load bill for editing', 'error')
+        }
+    }
+
+    async function handleBill() {
+        if (isLocked) return showToast('Financial Year is locked', 'error')
+        if (items.length === 0) return showToast('Add at least one item', 'error')
+        
+        const isEditing = !!editingBillId
+        const bill_number = isEditing ? editingBillNumber : nextBillNumberStr
+        
+        try {
+            let billId;
+            if (isEditing) {
+                billId = await window.api.updateBill({
+                    id: editingBillId,
+                    bill_number: editingBillNumber,
+                    customer_name: billDetails.patientName,
+                    customer_phone: '',
+                    address: billDetails.address,
+                    prescribed_by: billDetails.prescribedBy,
+                    total_amount: finalTotal,
+                    discount: totalDiscountAmount,
+                    paid_amount: finalTotal,
+                    items: items.map(i => ({
+                        medicine_id: i.medicine_id || null,
+                        batch_id: i.batch_id || null,
+                        quantity: i.qty,
+                        unit_price: i.price,
+                        total_price: i.amount,
+                        gst_rate: i.gstPercent !== undefined ? i.gstPercent : 5,
+                        sale_type: i.saleType || 'Sealed'
+                    }))
+                })
+            } else {
+                billId = await window.api.createBill({
+                    bill_number,
+                    customer_name: billDetails.patientName,
+                    customer_phone: '',
+                    address: billDetails.address,
+                    prescribed_by: billDetails.prescribedBy,
+                    total_amount: finalTotal,
+                    discount: totalDiscountAmount,
+                    paid_amount: finalTotal,
+                    items: items.map(i => ({
+                        medicine_id: i.medicine_id || null,
+                        batch_id: i.batch_id || null,
+                        quantity: i.qty,
+                        unit_price: i.price,
+                        total_price: i.amount,
+                        gst_rate: i.gstPercent !== undefined ? i.gstPercent : 5,
+                        sale_type: i.saleType || 'Sealed'
+                    }))
+                })
+            }
+            
+            const savedBillId = isEditing ? editingBillId : billId
+            const savedBillNo = bill_number
+
+            setEditingBillId(null)
+            setEditingBillNumber('')
+            setEditingBillDate('')
+            setItems([])
+            setBillDetails({ patientName: 'CASH', address: '-', prescribedBy: 'Self', discountRs: 0, otherCharges: 0, otherChargesType: 'E' })
+            setCurrentEntry({
+                company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: '10', gstPercent: '', batch: '', gid: '', location: '', stock: 0
+            })
+            setSelectedMed(null)
+            setSearch('')
+            load()
+            refreshMedicines()
+            setSuccessModal({ show: true, billNo: savedBillNo, billId: savedBillId, isEdit: isEditing })
+        } catch (err) {
+            console.error('Failed to process bill:', err)
+            showToast(err.message || 'Error processing bill', 'error')
+        }
     }
 
     const filtered = useMemo(() => {
@@ -891,7 +1092,7 @@ export default function Billing({ isYearLocked = false }) {
         return true
     })
     
-    const totalSalesHistory = filteredBills.reduce((sum, b) => sum + (Number(b.total_amount) || 0), 0)
+    const totalSalesHistory = filteredBills.filter(b => b.status !== 'CANCELLED').reduce((sum, b) => sum + (Number(b.total_amount) || 0), 0)
 
     const inputStyle = {
         padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1',
@@ -967,191 +1168,52 @@ export default function Billing({ isYearLocked = false }) {
             )}
 
             {/* Bill Success Modal */}
-            {successModal.show && (
-                <div style={{
-                    position: 'fixed',
-                    top: 0, left: 0, right: 0, bottom: 0,
-                    background: 'rgba(0,0,0,0.5)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 100000
-                }}>
-                    <div style={{
-                        background: '#fff',
-                        padding: '24px',
-                        borderRadius: '8px',
-                        width: '320px',
-                        boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)'
-                    }}>
-                        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-                            <div style={{ width: '48px', height: '48px', background: '#dcfce7', color: '#16a34a', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
-                                <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"></path></svg>
-                            </div>
-                            <h3 style={{ margin: 0, color: '#0f2d1f', fontSize: '18px' }}>Bill Created!</h3>
-                            <p style={{ margin: '8px 0 0', color: '#64748b', fontSize: '14px' }}>Bill No: <strong>{successModal.billNo}</strong></p>
-                        </div>
-                        <div style={{ display: 'flex', gap: '12px' }}>
-                            <button 
-                                onClick={() => {
-                                    const tempId = successModal.billId;
-                                    setSuccessModal({ show: false, billNo: '', billId: null });
-                                    if (tempId) triggerInvoicePrint(tempId, true);
-                                    setTimeout(() => document.getElementById('billing-company-input')?.focus(), 100);
-                                }}
-                                onMouseEnter={() => setSuccessFocus('print')}
-                                style={{
-                                    flex: 1,
-                                    padding: '8px',
-                                    background: successFocus === 'print' ? '#f0fdf4' : '#fff',
-                                    border: successFocus === 'print' ? '1px solid #16a34a' : '1px solid #cbd5e1',
-                                    color: successFocus === 'print' ? '#16a34a' : '#334155',
-                                    borderRadius: '4px',
-                                    fontWeight: '600',
-                                    cursor: 'pointer',
-                                    boxShadow: successFocus === 'print' ? '0 0 0 2px #fff, 0 0 0 4px #16a34a' : 'none',
-                                    outline: 'none',
-                                    transition: 'all 0.15s ease'
-                                }}
-                            >
-                                Print
-                            </button>
-                            <button 
-                                onClick={() => {
-                                    setSuccessModal({ show: false, billNo: '', billId: null });
-                                    setTimeout(() => document.getElementById('billing-company-input')?.focus(), 100);
-                                }}
-                                onMouseEnter={() => setSuccessFocus('ok')}
-                                style={{
-                                    flex: 1,
-                                    padding: '8px',
-                                    background: successFocus === 'ok' ? '#15803d' : '#16a34a',
-                                    border: 'none',
-                                    color: '#fff',
-                                    borderRadius: '4px',
-                                    fontWeight: '600',
-                                    cursor: 'pointer',
-                                    boxShadow: successFocus === 'ok' ? '0 0 0 2px #fff, 0 0 0 4px #16a34a' : 'none',
-                                    outline: 'none',
-                                    transition: 'all 0.15s ease'
-                                }}
-                            >
-                                OK
-                            </button>
-                        </div>
-
-                    </div>
-                </div>
-            )}
+            <SuccessModal 
+                show={successModal.show}
+                billNo={successModal.billNo}
+                billId={successModal.billId}
+                isEdit={successModal.isEdit}
+                successFocus={successFocus}
+                setSuccessFocus={setSuccessFocus}
+                onPrint={(billId) => {
+                    setSuccessModal({ show: false, billNo: '', billId: null, isEdit: false });
+                    if (billId) triggerInvoicePrint(billId, true);
+                    setTimeout(() => document.getElementById('billing-company-input')?.focus(), 100);
+                }}
+                onClose={() => {
+                    setSuccessModal({ show: false, billNo: '', billId: null, isEdit: false });
+                    setTimeout(() => document.getElementById('billing-company-input')?.focus(), 100);
+                }}
+            />
 
             {/* Clear Bill Confirmation Modal */}
-            {showClearConfirm && (
-                <div style={{
-                    position: 'fixed',
-                    top: 0, left: 0, right: 0, bottom: 0,
-                    background: 'rgba(0,0,0,0.5)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 100000
-                }}>
-                    <div style={{
-                        background: '#fff',
-                        padding: '24px',
-                        borderRadius: '8px',
-                        width: '400px',
-                        boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)',
-                        textAlign: 'center',
-                        animation: 'fadeIn 0.2s ease-out'
-                    }}>
-                        <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
-                        <h3 style={{ margin: '0 0 12px 0', color: '#0f172a', fontSize: '20px' }}>Clear Bill?</h3>
-                        <p style={{ margin: '0 0 24px 0', color: '#64748b', fontSize: '14px', lineHeight: '1.5' }}>
-                            Are you sure you want to clear this entire bill? This action cannot be undone.
-                        </p>
-                        
-                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
-                            <button 
-                                onClick={() => setShowClearConfirm(false)}
-                                style={{
-                                    flex: 1,
-                                    padding: '10px',
-                                    background: '#e2e8f0',
-                                    border: 'none',
-                                    color: '#475569',
-                                    borderRadius: '6px',
-                                    fontWeight: '600',
-                                    cursor: 'pointer',
-                                    transition: 'all 0.15s ease'
-                                }}
-                            >
-                                Cancel
-                            </button>
-                            <button 
-                                onClick={() => {
-                                    setItems([]);
-                                    setBillDetails({ patientName: 'CASH', address: '-', prescribedBy: 'Self', discountRs: 0, otherCharges: 0, otherChargesType: 'E' });
-                                    setCurrentEntry({ company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: 10, gstPercent: 5, batch: '', gid: '', location: '', stock: 0 });
-                                    localStorage.removeItem('retailDraft');
-                                    setShowClearConfirm(false);
-                                    showToast('Bill cleared successfully', 'success');
-                                    setTimeout(() => {
-                                        document.getElementById('billing-company-input')?.focus();
-                                    }, 100);
-                                }}
-                                style={{
-                                    flex: 1,
-                                    padding: '10px',
-                                    background: '#ef4444',
-                                    border: 'none',
-                                    color: '#fff',
-                                    borderRadius: '6px',
-                                    fontWeight: '600',
-                                    cursor: 'pointer',
-                                    boxShadow: '0 4px 6px -1px rgba(239, 68, 68, 0.3)',
-                                    transition: 'all 0.15s ease'
-                                }}
-                            >
-                                Yes, Clear It
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            <ClearConfirmModal 
+                show={showClearConfirm}
+                onClose={() => setShowClearConfirm(false)}
+                onConfirm={() => {
+                    setEditingBillId(null);
+                    setEditingBillNumber('');
+                    setEditingBillDate('');
+                    setItems([]);
+                    setBillDetails({ patientName: 'CASH', address: '-', prescribedBy: 'Self', discountRs: 0, otherCharges: 0, otherChargesType: 'E' });
+                    setCurrentEntry({ company: '', medicine: '', medicine_id: null, type: '', saleType: 'Sealed', power: '', packing: '', qty: '', price: '', disPercent: '10', gstPercent: '', batch: '', gid: '', location: '', stock: 0 });
+                    localStorage.removeItem('retailDraft');
+                    setShowClearConfirm(false);
+                    showToast('Bill cleared successfully', 'success');
+                    setTimeout(() => {
+                        document.getElementById('billing-company-input')?.focus();
+                    }, 100);
+                }}
+            />
 
             {/* Held Bills Modal */}
-            {showHeldModal && (
-                <div style={{
-                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-                    background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center',
-                    justifyContent: 'center', zIndex: 100000
-                }}>
-                    <div style={{ background: '#fff', padding: '24px', borderRadius: '8px', width: '500px', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-                            <h3 style={{ margin: 0, color: '#0f2d1f', fontSize: '18px' }}>Held Bills</h3>
-                            <button onClick={() => setShowHeldModal(false)} style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: '#64748b' }}>×</button>
-                        </div>
-                        {heldBills.length === 0 ? (
-                            <p style={{ color: '#64748b' }}>No held bills.</p>
-                        ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                {heldBills.map(hold => (
-                                    <div key={hold.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
-                                        <div>
-                                            <div style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a' }}>{hold.billDetails.patientName}</div>
-                                            <div style={{ fontSize: '12px', color: '#64748b' }}>{hold.items.length} items • ₹{hold.items.reduce((s, i) => s + i.amount, 0).toFixed(2)}</div>
-                                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{new Date(hold.timestamp).toLocaleTimeString()}</div>
-                                        </div>
-                                        <button onClick={() => handleRestoreBill(hold.id)} style={{ background: '#10b981', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '12px' }}>
-                                            Restore
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            )}
+            <HeldBillsModal 
+                show={showHeldModal}
+                heldBills={heldBills}
+                onClose={() => setShowHeldModal(false)}
+                onRestore={handleRestoreBill}
+            />
+
 
             {/* Top Toolbar */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
@@ -1167,10 +1229,10 @@ export default function Billing({ isYearLocked = false }) {
                             <button key={v} onClick={() => setView(v)} style={{
                                 padding: '6px 16px', borderRadius: '6px', border: 'none', cursor: 'pointer',
                                 fontSize: '13px', fontWeight: '600', transition: 'all 0.2s',
-                                background: view === v ? '#0f2d1f' : 'transparent',
+                                background: view === v ? (v === 'new' && editingBillId ? '#d97706' : '#0f2d1f') : 'transparent',
                                 color: view === v ? '#fff' : '#64748b',
                             }}>
-                                {v === 'new' ? 'New Bill' : 'History'}
+                                {v === 'new' ? (editingBillId ? 'Edit Bill ✏️' : 'New Bill') : 'History'}
                             </button>
                         ))}
                     </div>
@@ -1189,6 +1251,57 @@ export default function Billing({ isYearLocked = false }) {
                 </div>
 
             </div>
+
+            {/* Edit Mode Banner */}
+            {view === 'new' && editingBillId && (
+                <div style={{
+                    background: '#fffbeb',
+                    border: '1px solid #fde68a',
+                    borderRadius: '8px',
+                    padding: '10px 16px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: '12px',
+                    boxShadow: '0 1px 3px rgba(217,119,6,0.1)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <span style={{ fontSize: '18px' }}>✏️</span>
+                        <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontWeight: '800', color: '#92400e', fontSize: '14px' }}>
+                                    EDITING BILL: {editingBillNumber}
+                                </span>
+                                <span style={{ fontSize: '12px', color: '#b45309' }}>
+                                    (Original Date: {editingBillDate ? new Date(editingBillDate + (editingBillDate.includes('Z') ? '' : 'Z')).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '-'})
+                                </span>
+                            </div>
+                            <span style={{ fontSize: '11px', color: '#78350f', display: 'block', marginTop: '2px' }}>
+                                Modify medicines, quantities, discounts or customer info, then click &quot;Update &amp; Print&quot;. Stock and ledgers will adjust automatically.
+                            </span>
+                        </div>
+                    </div>
+                    <button
+                        onClick={cancelEdit}
+                        className="modern-button"
+                        style={{
+                            padding: '6px 14px',
+                            background: '#fee2e2',
+                            color: '#dc2626',
+                            border: '1px solid #fca5a5',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: '700',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                        }}
+                    >
+                        Cancel Edit ✕
+                    </button>
+                </div>
+            )}
 
             {view === 'new' ? (
                 <div style={{ display: 'flex', gap: '12px', flex: 1, minHeight: 0 }}>
@@ -1229,7 +1342,18 @@ export default function Billing({ isYearLocked = false }) {
                                         className="modern-input"
                                         style={inputStyle} 
                                         value={currentEntry.saleType || 'Sealed'} 
-                                        onChange={e => setCurrentEntry({...currentEntry, saleType: e.target.value})}
+                                        onChange={e => {
+                                            const newSaleType = e.target.value;
+                                            const isLoose = (newSaleType === 'Loose');
+                                            setCurrentEntry({
+                                                ...currentEntry,
+                                                saleType: newSaleType,
+                                                skip_batch_selection: isLoose,
+                                                location: isLoose ? 'Loose' : (currentEntry.location === 'Loose' ? '' : currentEntry.location),
+                                                batch_id: isLoose ? null : currentEntry.batch_id,
+                                                batch: isLoose ? '' : currentEntry.batch
+                                            });
+                                        }}
                                         onKeyDown={e => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
@@ -1337,7 +1461,9 @@ export default function Billing({ isYearLocked = false }) {
                                         onChange={val => setCurrentEntry({...currentEntry, packing: val})}
                                         options={availablePackings}
                                         onEnter={() => {
-                                            if (hasPowerOptions) {
+                                            if (currentEntry.saleType === 'Loose') {
+                                                document.getElementById('billing-qty-input')?.focus();
+                                            } else if (hasPowerOptions) {
                                                 document.getElementById('billing-power-input')?.focus();
                                             } else {
                                                 document.getElementById('billing-view-locations-btn')?.focus();
@@ -1354,23 +1480,45 @@ export default function Billing({ isYearLocked = false }) {
                                         value={currentEntry.power || ''}
                                         onChange={val => setCurrentEntry({...currentEntry, power: val})}
                                         options={availablePowers}
-                                        onEnter={() => document.getElementById('billing-view-locations-btn')?.focus()}
+                                        onEnter={() => {
+                                            if (currentEntry.saleType === 'Loose') {
+                                                document.getElementById('billing-qty-input')?.focus();
+                                            } else {
+                                                document.getElementById('billing-view-locations-btn')?.focus();
+                                            }
+                                        }}
                                         placeholder={hasPowerOptions ? "Power..." : "N/A"}
                                         readOnly={!hasPowerOptions}
                                         tabIndex={hasPowerOptions ? undefined : "-1"}
                                     />
                                 </div>
                                 <button 
-                                    id="billing-view-locations-btn"
-                                    onClick={() => handleViewLocations()} 
-                                    className="modern-button"
-                                    style={{ padding: '6px 14px', background: '#f8fafc', color: '#3b82f6', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '700', whiteSpace: 'nowrap' }}
-                                    onKeyDown={e => {
-                                        if (e.key === 'Enter') { e.preventDefault(); handleViewLocations(); }
-                                    }}
-                                >
-                                    View Locations
-                                </button>
+                                     id="billing-view-locations-btn"
+                                     onClick={() => handleViewLocations()} 
+                                     className="modern-button"
+                                     disabled={currentEntry.saleType === 'Loose'}
+                                     style={{ 
+                                         padding: '6px 14px', 
+                                         background: currentEntry.saleType === 'Loose' ? '#f1f5f9' : '#f8fafc', 
+                                         color: currentEntry.saleType === 'Loose' ? '#94a3b8' : '#3b82f6', 
+                                         border: '1px solid #bfdbfe', 
+                                         borderRadius: '6px', 
+                                         fontSize: '12px', 
+                                         cursor: currentEntry.saleType === 'Loose' ? 'not-allowed' : 'pointer', 
+                                         fontWeight: '700', 
+                                         whiteSpace: 'nowrap' 
+                                     }}
+                                     onKeyDown={e => {
+                                         if (e.key === 'Enter') { 
+                                             e.preventDefault(); 
+                                             if (currentEntry.saleType !== 'Loose') {
+                                                 handleViewLocations(); 
+                                             }
+                                         }
+                                     }}
+                                 >
+                                     View Locations
+                                 </button>
                                 <div style={{ 
                                     background: '#0f172a', color: '#4ade80', fontWeight: '800', fontSize: '13px',
                                     width: '40px', height: '32px', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center'
@@ -1391,7 +1539,7 @@ export default function Billing({ isYearLocked = false }) {
                                         className="modern-input"
                                         style={{...inputStyle, width: '60px', textAlign: 'center'}} 
                                         type="number" 
-                                        placeholder="0"
+                                        placeholder="1"
                                         value={currentEntry.qty} 
                                         onChange={e => {
                                             const val = e.target.value;
@@ -1421,7 +1569,7 @@ export default function Billing({ isYearLocked = false }) {
                                         className="modern-input"
                                         style={{...inputStyle, width: '80px', padding: '8px', textAlign: 'center'}} 
                                         type="number" 
-                                        placeholder="0"
+                                        placeholder="0.00"
                                         value={currentEntry.price} 
                                         onChange={e => setCurrentEntry({...currentEntry, price: e.target.value})} 
                                         onBlur={e => {
@@ -1447,6 +1595,7 @@ export default function Billing({ isYearLocked = false }) {
                                         className="modern-input"
                                         style={{...inputStyle, width: '60px', textAlign: 'center'}} 
                                         type="number" 
+                                        placeholder="10"
                                         value={currentEntry.disPercent} 
                                         onChange={e => setCurrentEntry({...currentEntry, disPercent: e.target.value})} 
                                         onKeyDown={e => {
@@ -1462,8 +1611,9 @@ export default function Billing({ isYearLocked = false }) {
                                     <input 
                                         id="billing-gst-input"
                                         className="modern-input"
-                                        style={{...inputStyle, width: '60px', textAlign: 'center', background: '#e2e8f0', color: '#64748b', cursor: 'not-allowed'}} 
+                                        style={{...inputStyle, width: '70px', textAlign: 'center', background: '#e2e8f0', color: '#64748b', cursor: 'not-allowed'}} 
                                         type="number" 
+                                        placeholder="5"
                                         value={currentEntry.gstPercent} 
                                         readOnly tabIndex="-1"
                                     />
@@ -1522,7 +1672,8 @@ export default function Billing({ isYearLocked = false }) {
                                                 <td style={{ padding: '8px 12px', textAlign: 'right' }}>{item.gstPercent}</td>
                                                 <td style={{ padding: '8px 12px' }}>{item.gid}</td>
                                                 <td style={{ padding: '8px 12px', color: '#64748b' }}>{item.location}</td>
-                                                <td style={{ padding: '8px 12px', textAlign: 'center' }}>
+                                                <td style={{ padding: '8px 12px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                                                    <button onClick={() => editCartItem(idx)} style={{ background: 'none', border: 'none', color: '#f59e0b', cursor: 'pointer', fontSize: '14px', marginRight: '6px' }} title="Edit Item">✏️</button>
                                                     <button onClick={() => removeItem(item.id)} style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '15px', fontWeight: '700' }} title="Remove">✕</button>
                                                 </td>
                                             </tr>
@@ -1549,8 +1700,8 @@ export default function Billing({ isYearLocked = false }) {
                             <div style={{...legendStyle, color: '#3730a3', borderBottom: '2px solid #e0e7ff', paddingBottom: '8px', marginBottom: '10px'}}>Bill Summary</div>
                             
                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', fontSize: '12px', fontWeight: '700' }}>
-                                <div style={{ color: '#64748b' }}>No. <span style={{ color: '#dc2626' }}>{nextBillNumberStr}</span></div>
-                                <div style={{ color: '#64748b' }}>Dt. <span style={{ color: '#dc2626' }}>{new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-')}</span></div>
+                                <div style={{ color: '#64748b' }}>No. <span style={{ color: editingBillId ? '#d97706' : '#dc2626', fontWeight: '800' }}>{editingBillId ? `${editingBillNumber} (EDIT)` : nextBillNumberStr}</span></div>
+                                <div style={{ color: '#64748b' }}>Dt. <span style={{ color: editingBillId ? '#d97706' : '#dc2626' }}>{editingBillId && editingBillDate ? new Date(editingBillDate + (editingBillDate.includes('Z') ? '' : 'Z')).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-') : new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-')}</span></div>
                             </div>
 
                             <div style={{ background: '#f8fafc', borderRadius: '8px', padding: '12px', border: '1px solid #e2e8f0', marginBottom: '16px' }}>
@@ -1614,8 +1765,8 @@ export default function Billing({ isYearLocked = false }) {
                             </div>
                         </div>
 
-                        <button id="billing-finalize-btn" onClick={handleBill} disabled={isLocked} className="modern-button" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', width: '100%', padding: '16px', background: 'linear-gradient(135deg, #2563eb, #1d4ed8)', color: '#ffffff', border: 'none', borderRadius: '12px', fontSize: '15px', fontWeight: '800', cursor: 'pointer', boxShadow: '0 10px 15px -3px rgba(37,99,235,0.3), 0 4px 6px -2px rgba(37,99,235,0.2)' }}>
-                            Finalise & Print <span style={{ fontSize: '12px', opacity: 0.8, fontWeight: '600', background: 'rgba(255,255,255,0.2)', padding: '2px 6px', borderRadius: '4px' }}>F2</span>
+                        <button id="billing-finalize-btn" onClick={handleBill} disabled={isLocked} className="modern-button" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', width: '100%', padding: '16px', background: editingBillId ? 'linear-gradient(135deg, #d97706, #b45309)' : 'linear-gradient(135deg, #2563eb, #1d4ed8)', color: '#ffffff', border: 'none', borderRadius: '12px', fontSize: '15px', fontWeight: '800', cursor: 'pointer', boxShadow: editingBillId ? '0 10px 15px -3px rgba(217,119,6,0.3), 0 4px 6px -2px rgba(217,119,6,0.2)' : '0 10px 15px -3px rgba(37,99,235,0.3), 0 4px 6px -2px rgba(37,99,235,0.2)' }}>
+                            {editingBillId ? 'Update & Print' : 'Finalise & Print'} <span style={{ fontSize: '12px', opacity: 0.8, fontWeight: '600', background: 'rgba(255,255,255,0.2)', padding: '2px 6px', borderRadius: '4px' }}>F2</span>
                         </button>
                         
                         {items.length > 0 && (
@@ -1662,21 +1813,42 @@ export default function Billing({ isYearLocked = false }) {
                                 <tbody>
                                     {filteredBills.length === 0 ? (
                                         <tr><td colSpan={6} style={{ padding: '30px', textAlign: 'center', color: '#94a3b8', fontSize: '14px' }}>No bills found</td></tr>
-                                    ) : filteredBills.map(b => (
-                                        <tr key={b.id} style={{ borderBottom: '1px solid #e2e8f0', transition: 'background 0.2s' }} onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                                            <td style={{ padding: '12px 16px', fontWeight: '700', color: '#16a34a' }}>{b.bill_number}</td>
-                                            <td style={{ padding: '12px 16px', fontWeight: '500', color: '#1e293b' }}>{b.customer_name || 'Walk-in'}</td>
-                                            <td style={{ padding: '12px 16px', fontWeight: '700', color: '#0f172a' }}>₹{b.total_amount.toFixed(2)}</td>
-                                            <td style={{ padding: '12px 16px', color: '#ef4444', fontWeight: '600' }}>₹{b.discount.toFixed(2)}</td>
+                                    ) : filteredBills.map(b => {
+                                        const isCancelled = b.status === 'CANCELLED'
+                                        return (
+                                        <tr key={b.id} style={{ borderBottom: '1px solid #e2e8f0', background: isCancelled ? '#fff5f5' : 'transparent', transition: 'background 0.2s' }} onMouseEnter={e => e.currentTarget.style.background = isCancelled ? '#fee2e2' : '#f8fafc'} onMouseLeave={e => e.currentTarget.style.background = isCancelled ? '#fff5f5' : 'transparent'}>
+                                            <td style={{ padding: '12px 16px', fontWeight: '700', color: isCancelled ? '#dc2626' : '#16a34a' }}>
+                                                <span style={{ textDecoration: isCancelled ? 'line-through' : 'none' }}>{b.bill_number}</span>
+                                                {isCancelled && (
+                                                    <span style={{ padding: '2px 6px', background: '#fee2e2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '4px', fontSize: '10px', fontWeight: '800', marginLeft: '6px' }}>CANCELLED</span>
+                                                )}
+                                            </td>
+                                            <td style={{ padding: '12px 16px', fontWeight: '500', color: isCancelled ? '#64748b' : '#1e293b' }}>{b.customer_name || 'Walk-in'}</td>
+                                            <td style={{ padding: '12px 16px', fontWeight: '700', color: isCancelled ? '#94a3b8' : '#0f172a' }}>
+                                                <span style={{ textDecoration: isCancelled ? 'line-through' : 'none' }}>₹{b.total_amount.toFixed(2)}</span>
+                                            </td>
+                                            <td style={{ padding: '12px 16px', color: isCancelled ? '#94a3b8' : '#ef4444', fontWeight: '600' }}>₹{b.discount.toFixed(2)}</td>
                                             <td style={{ padding: '12px 16px', color: '#64748b', fontWeight: '500' }}>
                                                 {new Date(b.created_at + (b.created_at.includes('Z') ? '' : 'Z')).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
                                             </td>
-                                            <td style={{ padding: '12px 16px', textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                            <td style={{ padding: '12px 16px', textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end', alignItems: 'center' }}>
                                                 <button className="modern-button" onClick={async () => { const data = await window.api.getBillById(b.id); setViewBillModal({ show: true, data }); }} style={{ padding: '6px 14px', background: '#eff6ff', border: '1px solid #bfdbfe', color: '#2563eb', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>View</button>
-                                                <button className="modern-button" onClick={() => triggerInvoicePrint(b.id)} style={{ padding: '6px 14px', background: '#f8fafc', border: '1px solid #cbd5e1', color: '#475569', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Print</button>
+                                                {!isCancelled && !isLocked && (
+                                                    <button className="modern-button" onClick={() => handleEditBill(b.id)} title="Edit this bill" style={{ padding: '6px 14px', background: '#fef3c7', border: '1px solid #fde68a', color: '#d97706', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '700' }}>Edit</button>
+                                                )}
+                                                {!isCancelled && (
+                                                    <button className="modern-button" onClick={() => triggerInvoicePrint(b.id)} style={{ padding: '6px 14px', background: '#f8fafc', border: '1px solid #cbd5e1', color: '#475569', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Print</button>
+                                                )}
+                                                {!isCancelled && !isLocked && (
+                                                    <button className="modern-button" onClick={() => setCancelModal({ show: true, bill: b })} title="Cancel this bill and reverse stock/accounts" style={{ padding: '6px 14px', background: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '700' }}>Cancel</button>
+                                                )}
+                                                {isCancelled && (
+                                                    <span title={b.cancellation_reason ? `Reason: ${b.cancellation_reason}` : 'Cancelled'} style={{ padding: '4px 10px', background: '#fee2e2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '6px', fontSize: '11px', fontWeight: '700' }}>Cancelled</span>
+                                                )}
                                             </td>
                                         </tr>
-                                    ))}
+                                        )
+                                    })}
                                 </tbody>
                             </table>
                         </div>
@@ -1704,7 +1876,7 @@ export default function Billing({ isYearLocked = false }) {
                         boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)',
                         display: 'flex', flexDirection: 'column', gap: '16px'
                     }}>
-                        <div style={{ fontSize: '18px', fontWeight: '700', color: '#0f2d1f' }}>Select Location/Batch for {pendingMedSelection?.name}</div>
+                        <div style={{ fontSize: '18px', fontWeight: '700', color: '#0f2d1f' }}>Select Location/Batch for {pendingMedSelection?.medicine} {pendingMedSelection?.power}</div>
                         <div style={{ fontSize: '13px', color: '#475569', marginBottom: '8px' }}>
                             Choose the location from where you are picking this medicine.
                         </div>
@@ -1716,6 +1888,7 @@ export default function Billing({ isYearLocked = false }) {
                                         <th style={{ padding: '8px', textAlign: 'left', fontWeight: '600', color: '#475569' }}>Godown</th>
                                         <th style={{ padding: '8px', textAlign: 'left', fontWeight: '600', color: '#475569' }}>Location</th>
                                         <th style={{ padding: '8px', textAlign: 'left', fontWeight: '600', color: '#475569' }}>Batch</th>
+                                        <th style={{ padding: '8px', textAlign: 'center', fontWeight: '600', color: '#475569' }}>Expiry</th>
                                         <th style={{ padding: '8px', textAlign: 'center', fontWeight: '600', color: '#475569' }}>Qty Available</th>
                                         <th style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: '#475569' }}>MRP</th>
                                     </tr>
@@ -1738,6 +1911,7 @@ export default function Billing({ isYearLocked = false }) {
                                                 <td style={{ padding: '8px' }}>{b.godown}</td>
                                                 <td style={{ padding: '8px', fontWeight: '600' }}>{b.location_type} {b.location_value}</td>
                                                 <td style={{ padding: '8px' }}>{b.batch_no}</td>
+                                                <td style={{ padding: '8px', textAlign: 'center' }}>{b.expiry_month && b.expiry_year ? `${b.expiry_month.toString().padStart(2, '0')}/${b.expiry_year.toString().slice(-2)}` : '-'}</td>
                                                 <td style={{ padding: '8px', textAlign: 'center', fontWeight: '700', color: '#2563eb' }}>{b.quantity}</td>
                                                 <td style={{ padding: '8px', textAlign: 'right' }}>₹{b.mrp}</td>
                                             </tr>
@@ -1782,6 +1956,16 @@ export default function Billing({ isYearLocked = false }) {
                                 <p style={{ margin: '4px 0 0', fontSize: '16px', fontWeight: '700', color: '#0f172a' }}>{viewBillModal.data.customer_name || 'Walk-in'}</p>
                             </div>
                         </div>
+
+                        {/* Cancelled Banner */}
+                        {viewBillModal.data.status === 'CANCELLED' && (
+                            <div style={{ background: '#fee2e2', borderBottom: '1px solid #fca5a5', padding: '10px 24px', display: 'flex', alignItems: 'center', gap: '8px', color: '#dc2626', fontWeight: '700', fontSize: '13px' }}>
+                                <span>⚠️ THIS BILL WAS CANCELLED</span>
+                                {viewBillModal.data.cancellation_reason && (
+                                    <span style={{ fontWeight: '500', color: '#991b1b' }}>— Reason: {viewBillModal.data.cancellation_reason}</span>
+                                )}
+                            </div>
+                        )}
 
                         {/* Items Table */}
                         <div style={{ maxHeight: '350px', overflowY: 'auto' }}>
@@ -1840,7 +2024,20 @@ export default function Billing({ isYearLocked = false }) {
                                 </div>
                             </div>
 
-                            <div style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                                {!isLocked && viewBillModal.data.status !== 'CANCELLED' && (
+                                    <button 
+                                        className="modern-button"
+                                        onClick={() => {
+                                            const bId = viewBillModal.data.id;
+                                            setViewBillModal({ show: false, data: null });
+                                            handleEditBill(bId);
+                                        }} 
+                                        style={{ padding: '10px 20px', background: '#fef3c7', color: '#b45309', border: '1px solid #fde68a', borderRadius: '6px', cursor: 'pointer', fontWeight: '700', fontSize: '13px' }}
+                                    >
+                                        ✏️ Edit Bill
+                                    </button>
+                                )}
                                 <button 
                                     className="modern-button"
                                     onClick={() => setViewBillModal({ show: false, data: null })} 
@@ -1853,6 +2050,19 @@ export default function Billing({ isYearLocked = false }) {
                     </div>
                 </div>
             )}
+
+            {/* Cancel Bill Confirmation Modal */}
+            <CancelBillModal
+                isOpen={cancelModal.show}
+                bill={cancelModal.bill}
+                billType="retail"
+                onClose={() => setCancelModal({ show: false, bill: null })}
+                onSuccess={(res) => {
+                    showToast(`Bill ${res.bill_number} cancelled successfully! Stock restored.`, 'success');
+                    load();
+                    if (refreshMedicines) refreshMedicines();
+                }}
+            />
             </div>
         </>
     )

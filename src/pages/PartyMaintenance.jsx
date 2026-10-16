@@ -81,6 +81,7 @@ export default function PartyMaintenance() {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(EMPTY_LEDGER)
+  const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState({ show: false, msg: '', type: 'success' })
   const { showConfirm } = useDialog()
 
@@ -125,20 +126,28 @@ export default function PartyMaintenance() {
 
   async function handleSave(e) {
     e.preventDefault()
+    if (saving) return
     if (!form.ledger_name.trim()) return showToast('Ledger Name is required', 'error')
     
-    const data = { ...form, opening_balance: parseFloat(form.opening_balance) || 0 }
-    
-    if (editing) {
-      await window.api.updateLedger({ ...data, id: editing })
-      showToast('Ledger updated successfully!')
-    } else {
-      await window.api.addLedger(data)
-      showToast('Ledger created successfully!')
+    setSaving(true)
+    try {
+      const data = { ...form, ledger_name: form.ledger_name.trim(), opening_balance: parseFloat(form.opening_balance) || 0 }
+      
+      if (editing) {
+        await window.api.updateLedger({ ...data, id: editing })
+        showToast('Ledger updated successfully!')
+      } else {
+        await window.api.addLedger(data)
+        showToast('Ledger created successfully!')
+      }
+      
+      setIsDrawerOpen(false)
+      load()
+    } catch (err) {
+      showToast(err.message || 'Error saving ledger', 'error')
+    } finally {
+      setSaving(false)
     }
-    
-    setIsDrawerOpen(false)
-    load()
   }
 
   async function handleDelete(id) {
@@ -527,8 +536,10 @@ export default function PartyMaintenance() {
 
           {/* Action Bar */}
           <div style={{ position: 'sticky', bottom: '-24px', background: '#f8fafc', padding: '24px 0', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-end', gap: '12px', zIndex: 10 }}>
-            <button type="button" onClick={() => setIsDrawerOpen(false)} style={{ padding: '12px 24px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', cursor: 'pointer', fontFamily: 'Outfit', fontWeight: '600', color: '#475569', transition: 'all 0.2s' }}>Cancel</button>
-            <button type="submit" style={{ padding: '12px 32px', borderRadius: '8px', border: 'none', background: 'linear-gradient(135deg, #0f2d1f 0%, #153c29 100%)', color: '#fff', fontWeight: '700', cursor: 'pointer', fontFamily: 'Outfit', boxShadow: '0 4px 12px rgba(15, 45, 31, 0.2)', transition: 'all 0.2s' }}>💾 Save Ledger</button>
+            <button type="button" onClick={() => setIsDrawerOpen(false)} disabled={saving} style={{ padding: '12px 24px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'Outfit', fontWeight: '600', color: '#475569', transition: 'all 0.2s', opacity: saving ? 0.6 : 1 }}>Cancel</button>
+            <button type="submit" disabled={saving} style={{ padding: '12px 32px', borderRadius: '8px', border: 'none', background: 'linear-gradient(135deg, #0f2d1f 0%, #153c29 100%)', color: '#fff', fontWeight: '700', cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'Outfit', boxShadow: '0 4px 12px rgba(15, 45, 31, 0.2)', transition: 'all 0.2s', opacity: saving ? 0.7 : 1 }}>
+              {saving ? 'Saving...' : '💾 Save Ledger'}
+            </button>
           </div>
 
         </form>

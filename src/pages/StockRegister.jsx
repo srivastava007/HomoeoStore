@@ -55,6 +55,22 @@ export default function StockRegister() {
 
     const companyList = Object.values(companyTotalsMap).sort((a,b) => a.company.localeCompare(b.company))
 
+    // Calculate Date-wise Totals
+    const dateTotalsMap = filteredBatches.reduce((acc, b) => {
+        // Fallback to current date if missing or invalid
+        const dateRaw = (b.created_at && !isNaN(new Date(b.created_at).getTime())) ? new Date(b.created_at) : new Date();
+        const dateKey = dateRaw.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+        if (!acc[dateKey]) {
+            acc[dateKey] = { date: dateKey, sortDate: dateRaw.getTime(), totalQty: 0, totalPurchaseValue: 0, totalMRPValue: 0 }
+        }
+        acc[dateKey].totalQty += Number(b.quantity || 0)
+        acc[dateKey].totalPurchaseValue += (Number(b.quantity) * Number(b.purchase_price || 0))
+        acc[dateKey].totalMRPValue += (Number(b.quantity) * Number(b.mrp || 0))
+        return acc
+    }, {})
+
+    const dateList = Object.values(dateTotalsMap).sort((a,b) => b.sortDate - a.sortDate) // Newest first
+
     // Pagination for Item-wise View
     const totalPages = Math.ceil(filteredBatches.length / itemsPerPage)
     const paginatedBatches = isExporting ? filteredBatches : filteredBatches.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
@@ -73,7 +89,7 @@ export default function StockRegister() {
         setTimeout(() => {
             const opt = {
                 margin: [10, 10, 10, 10],
-                filename: `Closing_Stock_${activeTab === 'item-wise' ? 'Detailed' : 'CompanyWise'}_${new Date().toISOString().split('T')[0]}.pdf`,
+                filename: `Closing_Stock_${activeTab === 'item-wise' ? 'Detailed' : activeTab === 'company-wise' ? 'CompanyWise' : 'DateWise'}_${new Date().toISOString().split('T')[0]}.pdf`,
                 image: { type: 'jpeg', quality: 0.98 },
                 html2canvas: { scale: 2, useCORS: true, logging: false },
                 jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' },
@@ -185,6 +201,9 @@ export default function StockRegister() {
                 <button style={tabStyle(activeTab === 'company-wise')} onClick={() => setActiveTab('company-wise')} disabled={isExporting}>
                     <span>🏢</span> Company-Wise Total
                 </button>
+                <button style={tabStyle(activeTab === 'date-wise')} onClick={() => setActiveTab('date-wise')} disabled={isExporting}>
+                    <span>📅</span> Date-Wise Statement
+                </button>
             </div>
 
             {/* Main Report Container */}
@@ -196,7 +215,7 @@ export default function StockRegister() {
                         {/* PDF Header */}
                         <div style={{ textAlign: 'center', marginBottom: '24px' }}>
                             <h2 style={{ margin: '0 0 4px 0', fontSize: '24px', color: '#0f172a' }}>
-                                Closing Stock Statement {activeTab === 'company-wise' ? '(Company-Wise)' : ''}
+                                Closing Stock Statement {activeTab === 'company-wise' ? '(Company-Wise)' : activeTab === 'date-wise' ? '(Date-Wise)' : ''}
                             </h2>
                             <p style={{ margin: 0, color: '#64748b' }}>As of {new Date().toLocaleDateString('en-IN')}</p>
                         </div>
@@ -277,7 +296,7 @@ export default function StockRegister() {
                                     </div>
                                 )}
                             </>
-                        ) : (
+                        ) : activeTab === 'company-wise' ? (
                             // Company-wise View
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
                                 <thead>
@@ -303,6 +322,38 @@ export default function StockRegister() {
                                                 </td>
                                                 <td style={{...tableCellStyle, textAlign: 'right', background: '#f0f9ff', fontWeight: '700', color: '#0369a1', fontSize: '15px'}}>
                                                     ₹ {c.totalMRPValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
+                        ) : (
+                            // Date-wise View
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
+                                <thead>
+                                    <tr>
+                                        <th style={tableHeaderStyle}>Entry Date</th>
+                                        <th style={{...tableHeaderStyle, textAlign: 'right'}}>Total Items (Qty)</th>
+                                        <th style={{...tableHeaderStyle, textAlign: 'right', background: '#f0fdf4', color: '#166534'}}>Total Value (P.Rate)</th>
+                                        <th style={{...tableHeaderStyle, textAlign: 'right', background: '#f0f9ff', color: '#0369a1'}}>Total Value (MRP)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {loading ? (
+                                        <tr><td colSpan="4" style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>Loading stock data...</td></tr>
+                                    ) : dateList.length === 0 ? (
+                                        <tr><td colSpan="4" style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>No stock entries found.</td></tr>
+                                    ) : (
+                                        dateList.map((d, i) => (
+                                            <tr key={i} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa', pageBreakInside: 'avoid' }}>
+                                                <td style={{...tableCellStyle, fontWeight: '700', color: '#0f172a', fontSize: '14px'}}>{d.date}</td>
+                                                <td style={{...tableCellStyle, textAlign: 'right', fontWeight: '600'}}>{d.totalQty}</td>
+                                                <td style={{...tableCellStyle, textAlign: 'right', background: '#f0fdf4', fontWeight: '700', color: '#166534', fontSize: '15px'}}>
+                                                    ₹ {d.totalPurchaseValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td style={{...tableCellStyle, textAlign: 'right', background: '#f0f9ff', fontWeight: '700', color: '#0369a1', fontSize: '15px'}}>
+                                                    ₹ {d.totalMRPValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                                 </td>
                                             </tr>
                                         ))

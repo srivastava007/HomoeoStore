@@ -100,6 +100,67 @@ function selectFinancialYear(dbName) {
   return true
 }
 
+function deduplicateAndProtectLedgers(database) {
+  try {
+    const ledgersTable = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ledgers'").get()
+    if (!ledgersTable) return
+
+    // Find duplicate ledger names by normalized lowercase trimmed string
+    const duplicateGroups = database.prepare(`
+      SELECT LOWER(TRIM(ledger_name)) as norm_name, COUNT(*) as cnt
+      FROM ledgers
+      GROUP BY LOWER(TRIM(ledger_name))
+      HAVING cnt > 1
+    `).all()
+
+    if (duplicateGroups && duplicateGroups.length > 0) {
+      console.log(`[Database Migration] Found ${duplicateGroups.length} duplicate ledger group(s) to merge...`)
+
+      database.transaction(() => {
+        for (const group of duplicateGroups) {
+          const rows = database.prepare(`
+            SELECT l.id, l.ledger_name, l.account_group, l.opening_balance, l.dr_cr,
+                   (SELECT COUNT(*) FROM transactions t WHERE t.ledger_id = l.id) as tx_count,
+                   (SELECT COUNT(*) FROM purchase_bills pb WHERE pb.supplier_id = l.id) as pb_count,
+                   (SELECT COUNT(*) FROM purchase_returns pr WHERE pr.supplier_id = l.id) as pr_count,
+                   (SELECT COUNT(*) FROM wholesale_bills wb WHERE wb.ledger_id = l.id) as wb_count,
+                   (SELECT COUNT(*) FROM wholesale_returns wr WHERE wr.ledger_id = l.id) as wr_count,
+                   (SELECT COUNT(*) FROM issue_slips isl WHERE isl.ledger_id = l.id) as is_count
+            FROM ledgers l
+            WHERE LOWER(TRIM(l.ledger_name)) = ?
+            ORDER BY (tx_count + pb_count + pr_count + wb_count + wr_count + is_count) DESC, l.id ASC
+          `).all(group.norm_name)
+
+          if (rows.length <= 1) continue
+
+          const primary = rows[0]
+          const duplicates = rows.slice(1)
+
+          console.log(`[Database Migration] Merging duplicate ledgers for "${primary.ledger_name}" into Primary ID ${primary.id}`)
+
+          for (const dup of duplicates) {
+            try { database.prepare(`UPDATE transactions SET ledger_id = ? WHERE ledger_id = ?`).run(primary.id, dup.id) } catch(e) {}
+            try { database.prepare(`UPDATE purchase_bills SET supplier_id = ? WHERE supplier_id = ?`).run(primary.id, dup.id) } catch(e) {}
+            try { database.prepare(`UPDATE purchase_returns SET supplier_id = ? WHERE supplier_id = ?`).run(primary.id, dup.id) } catch(e) {}
+            try { database.prepare(`UPDATE wholesale_bills SET ledger_id = ? WHERE ledger_id = ?`).run(primary.id, dup.id) } catch(e) {}
+            try { database.prepare(`UPDATE wholesale_returns SET ledger_id = ? WHERE ledger_id = ?`).run(primary.id, dup.id) } catch(e) {}
+            try { database.prepare(`UPDATE issue_slips SET ledger_id = ? WHERE ledger_id = ?`).run(primary.id, dup.id) } catch(e) {}
+            try { database.prepare(`UPDATE purchase_orders SET supplier_id = ? WHERE supplier_id = ?`).run(primary.id, dup.id) } catch(e) {}
+
+            database.prepare(`DELETE FROM ledgers WHERE id = ?`).run(dup.id)
+            console.log(`[Database Migration] Deleted duplicate ledger ID ${dup.id} (${dup.ledger_name})`)
+          }
+        }
+      })()
+    }
+
+    database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ledgers_norm_name ON ledgers(LOWER(TRIM(ledger_name)));`)
+    console.log('✅ Unique index on ledgers(LOWER(TRIM(ledger_name))) verified.')
+  } catch (err) {
+    console.error('Failed to deduplicate and protect ledgers:', err)
+  }
+}
+
 function runMigrations(database) {
   // Drop legacy placeholder and dormant clinical tables if they exist in the local database
   try {
@@ -139,6 +200,15 @@ function runMigrations(database) {
   addCol('wholesale_bills', 'eway_distance', 'INTEGER')
   
   addCol('wholesale_bill_items', 'hsn_code', 'TEXT')
+  
+  // Bill Cancellation migrations
+  addCol('bills', 'status', "TEXT DEFAULT 'ACTIVE'")
+  addCol('bills', 'cancellation_reason', 'TEXT')
+  addCol('bills', 'cancelled_at', 'DATETIME')
+
+  addCol('wholesale_bills', 'status', "TEXT DEFAULT 'ACTIVE'")
+  addCol('wholesale_bills', 'cancellation_reason', 'TEXT')
+  addCol('wholesale_bills', 'cancelled_at', 'DATETIME')
   
   addCol('master.store_profile', 'bank_name', 'TEXT')
   addCol('master.store_profile', 'account_number', 'TEXT')
@@ -328,6 +398,8 @@ function runMigrations(database) {
   `)
   
   addCol('bill_items', 'batch_id', 'INTEGER')
+  addCol('bills', 'address', 'TEXT')
+  addCol('bills', 'prescribed_by', 'TEXT')
 
   let cashLedgerId = database.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'CASH' AND account_group = 'CASH IN HAND'`).get()?.id
   if (!cashLedgerId) {
@@ -349,20 +421,29 @@ function runMigrations(database) {
 
   let salesLedger = database.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'Sales Account'`).get()
   if (!salesLedger) {
-    database.prepare(`
+    const res = database.prepare(`
       INSERT INTO ledgers (ledger_name, account_group, opening_balance, dr_cr, ledger_category, ledger_type)
       VALUES ('Sales Account', 'SALES ACCOUNTS', 0, 'Cr', 'OTHERS', 'UNREGISTERED')
     `).run()
+    salesLedger = { id: res.lastInsertRowid }
   }
 
-  // Backfill old bills into transactions
+  // Ensure Sales Account opening balance is 0 Cr (nominal account)
+  database.prepare(`
+    UPDATE ledgers 
+    SET opening_balance = 0, dr_cr = 'Cr' 
+    WHERE account_group = 'SALES ACCOUNTS' AND opening_balance != 0
+  `).run()
+
+  // Backfill old bills into transactions for CASH
   if (cashLedgerId) {
     const oldBills = database.prepare(`
       SELECT * FROM bills 
-      WHERE bill_number NOT IN (
-        SELECT voucher_no FROM transactions WHERE voucher_type = 'Sale'
-      )
-    `).all()
+      WHERE (status IS NULL OR status != 'CANCELLED')
+        AND bill_number NOT IN (
+          SELECT voucher_no FROM transactions WHERE ledger_id = ? AND voucher_type = 'Sale'
+        )
+    `).all(cashLedgerId)
     
     if (oldBills.length > 0) {
       const insertTx = database.prepare(`
@@ -376,6 +457,36 @@ function runMigrations(database) {
             ledger_id: cashLedgerId,
             bill_number: bill.bill_number,
             particulars: `Cash Sale to ${bill.customer_name || 'Walk-in'}`,
+            total_amount: bill.total_amount,
+            created_at: bill.created_at
+          })
+        }
+      })()
+    }
+  }
+
+  // Backfill retail bills into transactions for Sales Account (Credit)
+  if (salesLedger) {
+    const unpostedSalesBills = database.prepare(`
+      SELECT * FROM bills 
+      WHERE (status IS NULL OR status != 'CANCELLED')
+        AND total_amount > 0 AND bill_number NOT IN (
+          SELECT voucher_no FROM transactions WHERE ledger_id = ? AND voucher_type = 'Sale'
+        )
+    `).all(salesLedger.id)
+
+    if (unpostedSalesBills.length > 0) {
+      const insertSalesTx = database.prepare(`
+        INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount, created_at)
+        VALUES (DATE(@created_at), @ledger_id, 'Sale', @bill_number, @particulars, 0, @total_amount, @created_at)
+      `)
+      
+      database.transaction(() => {
+        for (const bill of unpostedSalesBills) {
+          insertSalesTx.run({
+            ledger_id: salesLedger.id,
+            bill_number: bill.bill_number,
+            particulars: `Retail Sale to ${bill.customer_name || 'Walk-in'}`,
             total_amount: bill.total_amount,
             created_at: bill.created_at
           })
@@ -453,8 +564,10 @@ function runMigrations(database) {
   try { database.exec(`CREATE INDEX IF NOT EXISTS idx_mr_ledgers ON mrs(ledger_id);`); } catch(e) {}
   
   try { database.exec(`CREATE INDEX IF NOT EXISTS master.idx_medicines_name ON medicines(name);`); } catch(e) {}
-  try { database.exec(`CREATE INDEX IF NOT EXISTS master.idx_medicines_supplier_id ON medicines(supplier_id);`); } catch(e) {}
-  try { database.exec(`CREATE INDEX IF NOT EXISTS master.idx_ledgers_name ON ledgers(ledger_name);`); } catch(e) {}
+  try { database.exec(`CREATE INDEX IF NOT EXISTS idx_ledgers_name ON ledgers(ledger_name);`); } catch(e) {}
+  
+  // Deduplicate ledgers and ensure unique constraint
+  deduplicateAndProtectLedgers(database)
 }
 
 function getDB() {
@@ -673,8 +786,10 @@ function createFinancialYear(data) {
 
   // Get previous FY DB name
   let oldDbName = null;
+  let oldDbEndDate = null;
   if (config.financialYears.length > 0) {
     oldDbName = config.financialYears[config.financialYears.length - 1].dbName;
+    oldDbEndDate = config.financialYears[config.financialYears.length - 1].endDate;
     config.financialYears[config.financialYears.length - 1].is_locked = true;
   }
 
@@ -695,6 +810,7 @@ function createFinancialYear(data) {
   const txSchemaPath = path.join(__dirname, 'tx_schema.sql')
   const schema = fs.readFileSync(txSchemaPath, 'utf-8')
   newDb.exec(schema)
+  deduplicateAndProtectLedgers(newDb)
   
   // Carry Forward Ledgers from Previous FY
   if (oldDbName) {
@@ -702,14 +818,27 @@ function createFinancialYear(data) {
       const oldDbPath = path.join(app.getPath('userData'), oldDbName);
       if (fs.existsSync(oldDbPath)) {
         const oldDb = new Database(oldDbPath);
-        const oldLedgers = oldDb.prepare(`
-          SELECT l.*, 
-                 (l.opening_balance * CASE WHEN l.dr_cr = 'Dr' THEN 1 ELSE -1 END) 
-                 + COALESCE(SUM(t.dr_amount), 0) - COALESCE(SUM(t.cr_amount), 0) as current_balance_raw
-          FROM ledgers l
-          LEFT JOIN transactions t ON l.id = t.ledger_id
-          GROUP BY l.id
-        `).all();
+        
+        let oldLedgers;
+        if (oldDbEndDate) {
+          oldLedgers = oldDb.prepare(`
+            SELECT l.*, 
+                   (l.opening_balance * CASE WHEN l.dr_cr = 'Dr' THEN 1 ELSE -1 END) 
+                   + COALESCE(SUM(t.dr_amount), 0) - COALESCE(SUM(t.cr_amount), 0) as current_balance_raw
+            FROM ledgers l
+            LEFT JOIN transactions t ON l.id = t.ledger_id AND t.date <= ?
+            GROUP BY l.id
+          `).all(oldDbEndDate);
+        } else {
+          oldLedgers = oldDb.prepare(`
+            SELECT l.*, 
+                   (l.opening_balance * CASE WHEN l.dr_cr = 'Dr' THEN 1 ELSE -1 END) 
+                   + COALESCE(SUM(t.dr_amount), 0) - COALESCE(SUM(t.cr_amount), 0) as current_balance_raw
+            FROM ledgers l
+            LEFT JOIN transactions t ON l.id = t.ledger_id
+            GROUP BY l.id
+          `).all();
+        }
         
         const insertLedger = newDb.prepare(`
           INSERT INTO ledgers (
@@ -726,13 +855,21 @@ function createFinancialYear(data) {
         `);
         
         newDb.transaction(() => {
+          const seenLedgers = new Set()
           for (const l of oldLedgers) {
-            const currentBalRaw = l.current_balance_raw || 0;
-            const newOpeningBal = Math.abs(currentBalRaw);
-            const newDrCr = currentBalRaw >= 0 ? 'Dr' : 'Cr';
+            const normName = (l.ledger_name || '').trim().toLowerCase()
+            if (!normName || seenLedgers.has(normName)) {
+              continue
+            }
+            seenLedgers.add(normName)
+
+            const isNominal = ['SALES ACCOUNTS', 'PURCHASE ACCOUNTS', 'DIRECT EXPENSES', 'INDIRECT EXPENSES', 'DIRECT INCOMES', 'INDIRECT INCOMES'].includes((l.account_group || '').toUpperCase())
+            const currentBalRaw = isNominal ? 0 : (l.current_balance_raw || 0);
+            const newOpeningBal = isNominal ? 0 : Math.abs(currentBalRaw);
+            const newDrCr = isNominal ? (l.account_group === 'SALES ACCOUNTS' || (l.account_group || '').includes('INCOME') ? 'Cr' : 'Dr') : (currentBalRaw >= 0 ? 'Dr' : 'Cr');
             
             insertLedger.run({
-              ledger_name: l.ledger_name,
+              ledger_name: l.ledger_name.trim(),
               station: l.station,
               account_group: l.account_group,
               balancing_method: l.balancing_method,
@@ -792,7 +929,7 @@ function deleteAccountGroup(id) {
 // ─── Medicines ────────────────────────────────────────────
 function getMedicines() {
   return getDB().prepare(`
-    SELECT m.*, s.name as supplier_name 
+    SELECT m.*, s.name as supplier_name
     FROM master.medicines m
     LEFT JOIN master.suppliers s ON m.supplier_id = s.id
     ORDER BY m.name ASC
@@ -821,7 +958,7 @@ function searchMedicinesPaginated({ search = '', page = 1, limit = 50 }) {
   const countRow = db.prepare(`SELECT COUNT(*) as total ${queryBase}`).get(...params)
   
   const data = db.prepare(`
-    SELECT m.*, s.name as supplier_name 
+    SELECT m.*, s.name as supplier_name
     ${queryBase}
     ORDER BY m.name ASC
     LIMIT ? OFFSET ?
@@ -975,8 +1112,27 @@ function getLedgers() {
 }
 
 function addLedger(data) {
-  const merged = { status: 'ACTIVE', ...data }
-  return getDB().prepare(`
+  const trimmedName = (data.ledger_name || '').trim()
+  if (!trimmedName) {
+    throw new Error('Ledger Name is required')
+  }
+
+  const db = getDB()
+  const existing = db.prepare('SELECT id, ledger_name FROM ledgers WHERE LOWER(TRIM(ledger_name)) = LOWER(TRIM(?))').get(trimmedName)
+  if (existing) {
+    throw new Error(`A ledger named "${existing.ledger_name}" already exists.`)
+  }
+
+  const defaults = {
+    ledger_name: trimmedName, station: null, account_group: null, balancing_method: null,
+    opening_balance: 0, dr_cr: 'Dr', mail_to: null, address: null, pin_code: null,
+    email: null, website: null, contact_person: null, designation: null,
+    phone_office: null, phone_res: null, mobile: null, fax: null, dl_no: null,
+    dl_expiry: null, gst_heading: null, gstin: null, pan_no: null,
+    ledger_category: null, state: null, country: null, ledger_type: null, status: 'ACTIVE'
+  }
+  const merged = { ...defaults, ...data, ledger_name: trimmedName }
+  const res = db.prepare(`
     INSERT INTO ledgers (
       ledger_name, station, account_group, balancing_method, opening_balance, dr_cr,
       mail_to, address, pin_code, email, website, contact_person, designation,
@@ -989,11 +1145,33 @@ function addLedger(data) {
       @ledger_category, @state, @country, @ledger_type, @status
     )
   `).run(merged)
+  return { success: true, id: res.lastInsertRowid, changes: res.changes }
 }
 
 function updateLedger(data) {
-  const merged = { status: 'ACTIVE', ...data }
-  const stmt = getDB().prepare(`
+  const trimmedName = (data.ledger_name || '').trim()
+  if (!trimmedName) {
+    throw new Error('Ledger Name is required')
+  }
+
+  const db = getDB()
+  if (data.id) {
+    const existing = db.prepare('SELECT id, ledger_name FROM ledgers WHERE LOWER(TRIM(ledger_name)) = LOWER(TRIM(?)) AND id != ?').get(trimmedName, data.id)
+    if (existing) {
+      throw new Error(`Another ledger named "${existing.ledger_name}" already exists.`)
+    }
+  }
+
+  const defaults = {
+    ledger_name: trimmedName, station: null, account_group: null, balancing_method: null,
+    opening_balance: 0, dr_cr: 'Dr', mail_to: null, address: null, pin_code: null,
+    email: null, website: null, contact_person: null, designation: null,
+    phone_office: null, phone_res: null, mobile: null, fax: null, dl_no: null,
+    dl_expiry: null, gst_heading: null, gstin: null, pan_no: null,
+    ledger_category: null, state: null, country: null, ledger_type: null, status: 'ACTIVE'
+  }
+  const merged = { ...defaults, ...data, ledger_name: trimmedName }
+  const stmt = db.prepare(`
     UPDATE ledgers SET
       ledger_name=@ledger_name, station=@station, account_group=@account_group,
       balancing_method=@balancing_method, opening_balance=@opening_balance, dr_cr=@dr_cr,
@@ -1004,7 +1182,8 @@ function updateLedger(data) {
       state=@state, country=@country, ledger_type=@ledger_type, status=@status
     WHERE id=@id
   `)
-  return stmt.run(merged)
+  const res = stmt.run(merged)
+  return { success: true, id: data.id, changes: res.changes }
 }
 
 function deleteLedger(id) {
@@ -1206,14 +1385,17 @@ function deletePacking(id) {
 
 // ─── Billing ─────────────────────────────────────────────
 function createBill(data) {
-  const { bill_number, customer_name, customer_phone, total_amount, discount, paid_amount, items } = data
+  const { bill_number, customer_name, customer_phone, total_amount, discount, paid_amount, items, address, prescribed_by } = data
   const db = getDB()
 
   const insertBill = db.transaction(() => {
     // Check stock availability BEFORE creating the bill (aggregate by medicine first)
     const requiredStock = {}
     for (const item of items) {
-      requiredStock[item.medicine_id] = (requiredStock[item.medicine_id] || 0) + Number(item.quantity)
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+      if (!isLoose && item.medicine_id) {
+        requiredStock[item.medicine_id] = (requiredStock[item.medicine_id] || 0) + Number(item.quantity)
+      }
     }
     
     for (const medId in requiredStock) {
@@ -1226,7 +1408,8 @@ function createBill(data) {
     // Check batch availability if batches are selected
     const requiredBatchStock = {}
     for (const item of items) {
-      if (item.batch_id) {
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+      if (!isLoose && item.batch_id) {
         requiredBatchStock[item.batch_id] = (requiredBatchStock[item.batch_id] || 0) + Number(item.quantity)
       }
     }
@@ -1238,9 +1421,18 @@ function createBill(data) {
     }
 
     const bill = db.prepare(`
-      INSERT INTO bills (bill_number, customer_name, customer_phone, total_amount, discount, paid_amount)
-      VALUES (@bill_number, @customer_name, @customer_phone, @total_amount, @discount, @paid_amount)
-    `).run({ bill_number, customer_name, customer_phone, total_amount, discount, paid_amount })
+      INSERT INTO bills (bill_number, customer_name, customer_phone, total_amount, discount, paid_amount, address, prescribed_by)
+      VALUES (@bill_number, @customer_name, @customer_phone, @total_amount, @discount, @paid_amount, @address, @prescribed_by)
+    `).run({ 
+      bill_number, 
+      customer_name, 
+      customer_phone: customer_phone || '', 
+      total_amount, 
+      discount, 
+      paid_amount,
+      address: address || '',
+      prescribed_by: prescribed_by || ''
+    })
 
     const billId = bill.lastInsertRowid
 
@@ -1250,25 +1442,45 @@ function createBill(data) {
         VALUES (@bill_id, @medicine_id, @batch_id, @quantity, @unit_price, @total_price, @gst_rate)
       `).run({ bill_id: billId, ...item, batch_id: item.batch_id || null })
 
-      // Deduct stock automatically
-      db.prepare(`
-        UPDATE master.medicines SET stock_quantity = stock_quantity - ? WHERE id = ?
-      `).run(item.quantity, item.medicine_id)
-
-      if (item.batch_id) {
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id;
+      
+      // Deduct stock automatically ONLY if it is NOT a loose item
+      if (!isLoose) {
         db.prepare(`
-          UPDATE master.stock_batches SET quantity = quantity - ? WHERE id = ?
-        `).run(item.quantity, item.batch_id)
+          UPDATE master.medicines SET stock_quantity = stock_quantity - ? WHERE id = ?
+        `).run(item.quantity, item.medicine_id)
+
+        if (item.batch_id) {
+          db.prepare(`
+            UPDATE master.stock_batches SET quantity = quantity - ? WHERE id = ?
+          `).run(item.quantity, item.batch_id)
+        }
       }
     }
 
-    // Add CASH transaction
+    // 1. Debit CASH ledger
     const cashLedger = db.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'CASH' AND account_group = 'CASH IN HAND'`).get()
     if (cashLedger && total_amount > 0) {
       db.prepare(`
         INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
-        VALUES (DATE('now'), ?, 'Sale', ?, ?, ?, 0)
+        VALUES (DATE('now', 'localtime'), ?, 'Sale', ?, ?, ?, 0)
       `).run(cashLedger.id, bill_number, `Cash Sale to ${customer_name || 'Walk-in'}`, total_amount)
+    }
+
+    // 2. Credit "Sales Account" ledger
+    let salesLedger = db.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'Sales Account'`).get()
+    if (!salesLedger) {
+      const res = db.prepare(`
+        INSERT INTO ledgers (ledger_name, account_group, opening_balance, dr_cr, ledger_category, ledger_type)
+        VALUES ('Sales Account', 'SALES ACCOUNTS', 0, 'Cr', 'OTHERS', 'UNREGISTERED')
+      `).run()
+      salesLedger = { id: res.lastInsertRowid }
+    }
+    if (salesLedger && total_amount > 0) {
+      db.prepare(`
+        INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
+        VALUES (DATE('now', 'localtime'), ?, 'Sale', ?, ?, 0, ?)
+      `).run(salesLedger.id, bill_number, `Retail Sale to ${customer_name || 'Walk-in'}`, total_amount)
     }
 
     return billId
@@ -1397,14 +1609,265 @@ function getBillById(id) {
   const db = getDB()
   const bill = db.prepare(`SELECT * FROM bills WHERE id=?`).get(id)
   const items = db.prepare(`
-    SELECT bi.*, m.name as medicine_name, m.company, m.potency, m.unit, 
-           sb.batch_no, sb.godown, sb.location_type, sb.location_value
+    SELECT bi.*, m.name as medicine_name, m.company, m.potency, m.unit, m.category,
+           sb.batch_no, sb.mrp, sb.godown, sb.location_type, sb.location_value, sb.quantity as batch_stock
     FROM bill_items bi
-    JOIN master.medicines m ON bi.medicine_id = m.id
+    LEFT JOIN master.medicines m ON bi.medicine_id = m.id
     LEFT JOIN master.stock_batches sb ON bi.batch_id = sb.id
     WHERE bi.bill_id = ?
   `).all(id)
   return { ...bill, items }
+}
+
+function updateBill(data) {
+  if (isCurrentYearLocked()) {
+    throw new Error('This financial year is locked. Bills cannot be modified.')
+  }
+
+  const { id, bill_number, customer_name, customer_phone, total_amount, discount, paid_amount, items, address, prescribed_by } = data
+  const db = getDB()
+
+  const updateBillTx = db.transaction(() => {
+    // 1. Fetch existing bill
+    const existingBill = db.prepare(`SELECT * FROM bills WHERE id = ?`).get(id)
+    if (!existingBill) throw new Error('Bill not found')
+
+    // 2. Fetch old bill items
+    const oldItems = db.prepare(`SELECT * FROM bill_items WHERE bill_id = ?`).all(id)
+
+    // 3. Revert stock deductions from old items
+    for (const oldItem of oldItems) {
+      if (oldItem.batch_id) {
+        if (oldItem.medicine_id) {
+          db.prepare(`
+            UPDATE master.medicines SET stock_quantity = stock_quantity + ? WHERE id = ?
+          `).run(oldItem.quantity, oldItem.medicine_id)
+        }
+
+        db.prepare(`
+          UPDATE master.stock_batches SET quantity = quantity + ? WHERE id = ?
+        `).run(oldItem.quantity, oldItem.batch_id)
+      }
+    }
+
+    // 4. Validate stock for new items
+    const requiredStock = {}
+    for (const item of items) {
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+      if (!isLoose && item.medicine_id) {
+        requiredStock[item.medicine_id] = (requiredStock[item.medicine_id] || 0) + Number(item.quantity)
+      }
+    }
+    
+    for (const medId in requiredStock) {
+      const med = db.prepare(`SELECT name, stock_quantity FROM master.medicines WHERE id = ?`).get(medId)
+      if (med && med.stock_quantity < requiredStock[medId]) {
+        throw new Error(`Insufficient stock for "${med.name}". Available: ${med.stock_quantity}, Requested: ${requiredStock[medId]}`)
+      }
+    }
+
+    const requiredBatchStock = {}
+    for (const item of items) {
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+      if (!isLoose && item.batch_id) {
+        requiredBatchStock[item.batch_id] = (requiredBatchStock[item.batch_id] || 0) + Number(item.quantity)
+      }
+    }
+    for (const batchId in requiredBatchStock) {
+      const batch = db.prepare(`SELECT batch_no, quantity FROM master.stock_batches WHERE id = ?`).get(batchId)
+      if (batch && batch.quantity < requiredBatchStock[batchId]) {
+        throw new Error(`Insufficient stock in location/batch "${batch.batch_no}". Available: ${batch.quantity}, Requested: ${requiredBatchStock[batchId]}`)
+      }
+    }
+
+    // 5. Update bills table (preserve original created_at)
+    db.prepare(`
+      UPDATE bills SET
+        bill_number = @bill_number,
+        customer_name = @customer_name,
+        customer_phone = @customer_phone,
+        total_amount = @total_amount,
+        discount = @discount,
+        paid_amount = @paid_amount,
+        address = @address,
+        prescribed_by = @prescribed_by
+      WHERE id = @id
+    `).run({
+      id,
+      bill_number: bill_number || existingBill.bill_number,
+      customer_name,
+      customer_phone: customer_phone || '',
+      total_amount,
+      discount,
+      paid_amount,
+      address: address || '',
+      prescribed_by: prescribed_by || ''
+    })
+
+    // 6. Delete old bill_items
+    db.prepare(`DELETE FROM bill_items WHERE bill_id = ?`).run(id)
+
+    // 7. Insert new items and deduct stock
+    for (const item of items) {
+      db.prepare(`
+        INSERT INTO bill_items (bill_id, medicine_id, batch_id, quantity, unit_price, total_price, gst_rate)
+        VALUES (@bill_id, @medicine_id, @batch_id, @quantity, @unit_price, @total_price, @gst_rate)
+      `).run({ bill_id: id, ...item, batch_id: item.batch_id || null })
+
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+      if (!isLoose) {
+        if (item.medicine_id) {
+          db.prepare(`
+            UPDATE master.medicines SET stock_quantity = stock_quantity - ? WHERE id = ?
+          `).run(item.quantity, item.medicine_id)
+        }
+        if (item.batch_id) {
+          db.prepare(`
+            UPDATE master.stock_batches SET quantity = quantity - ? WHERE id = ?
+          `).run(item.quantity, item.batch_id)
+        }
+      }
+    }
+
+    // 8. Update accounting ledger transactions
+    const activeBillNumber = bill_number || existingBill.bill_number
+    db.prepare(`DELETE FROM transactions WHERE voucher_type = 'Sale' AND voucher_no = ?`).run(activeBillNumber)
+    if (existingBill.bill_number && existingBill.bill_number !== activeBillNumber) {
+      db.prepare(`DELETE FROM transactions WHERE voucher_type = 'Sale' AND voucher_no = ?`).run(existingBill.bill_number)
+    }
+
+    const billDate = existingBill.created_at ? existingBill.created_at.split(' ')[0] : null
+
+    // 8a. Debit CASH ledger
+    const cashLedger = db.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'CASH' AND account_group = 'CASH IN HAND'`).get()
+    if (cashLedger && total_amount > 0) {
+      db.prepare(`
+        INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
+        VALUES (COALESCE(?, DATE('now', 'localtime')), ?, 'Sale', ?, ?, ?, 0)
+      `).run(billDate, cashLedger.id, activeBillNumber, `Cash Sale to ${customer_name || 'Walk-in'}`, total_amount)
+    }
+
+    // 8b. Credit Sales Account ledger
+    let salesLedger = db.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'Sales Account'`).get()
+    if (!salesLedger) {
+      const res = db.prepare(`
+        INSERT INTO ledgers (ledger_name, account_group, opening_balance, dr_cr, ledger_category, ledger_type)
+        VALUES ('Sales Account', 'SALES ACCOUNTS', 0, 'Cr', 'OTHERS', 'UNREGISTERED')
+      `).run()
+      salesLedger = { id: res.lastInsertRowid }
+    }
+    if (salesLedger && total_amount > 0) {
+      db.prepare(`
+        INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
+        VALUES (COALESCE(?, DATE('now', 'localtime')), ?, 'Sale', ?, ?, 0, ?)
+      `).run(billDate, salesLedger.id, activeBillNumber, `Retail Sale to ${customer_name || 'Walk-in'}`, total_amount)
+    }
+
+    return id
+  })
+
+  return updateBillTx()
+}
+
+function cancelRetailBill({ id, reason }) {
+  if (isCurrentYearLocked()) {
+    throw new Error('This financial year is locked. Bills cannot be cancelled.')
+  }
+  const db = getDB()
+
+  const cancelTx = db.transaction(() => {
+    const bill = db.prepare(`SELECT * FROM bills WHERE id = ?`).get(id)
+    if (!bill) throw new Error('Bill not found')
+    if (bill.status === 'CANCELLED') {
+      throw new Error(`Bill ${bill.bill_number} is already cancelled.`)
+    }
+
+    // Check if sales return exists for this bill
+    const returnCheck = db.prepare(`SELECT COUNT(*) as cnt FROM sales_returns WHERE bill_number = ?`).get(bill.bill_number)
+    if (returnCheck && returnCheck.cnt > 0) {
+      throw new Error(`Cannot cancel bill ${bill.bill_number} because a Sales Return already exists for it. Please delete the Sales Return first.`)
+    }
+
+    // 1. Revert stock deductions for all non-loose items
+    const items = db.prepare(`SELECT * FROM bill_items WHERE bill_id = ?`).all(id)
+    for (const item of items) {
+      const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+      if (!isLoose) {
+        if (item.medicine_id) {
+          db.prepare(`
+            UPDATE master.medicines SET stock_quantity = stock_quantity + ? WHERE id = ?
+          `).run(item.quantity, item.medicine_id)
+        }
+        if (item.batch_id) {
+          db.prepare(`
+            UPDATE master.stock_batches SET quantity = quantity + ? WHERE id = ?
+          `).run(item.quantity, item.batch_id)
+        }
+      }
+    }
+
+    // 2. Delete accounting transactions (CASH Debit & Sales Account Credit)
+    db.prepare(`DELETE FROM transactions WHERE voucher_type = 'Sale' AND voucher_no = ?`).run(bill.bill_number)
+
+    // 3. Mark bill as CANCELLED
+    db.prepare(`
+      UPDATE bills SET 
+        status = 'CANCELLED',
+        cancellation_reason = ?,
+        cancelled_at = datetime('now', 'localtime')
+      WHERE id = ?
+    `).run(reason || 'Cancelled by user', id)
+
+    return { success: true, bill_number: bill.bill_number }
+  })
+
+  return cancelTx()
+}
+
+function deleteRetailBill(id) {
+  if (isCurrentYearLocked()) {
+    throw new Error('This financial year is locked. Bills cannot be deleted.')
+  }
+  const db = getDB()
+
+  const deleteTx = db.transaction(() => {
+    const bill = db.prepare(`SELECT * FROM bills WHERE id = ?`).get(id)
+    if (!bill) throw new Error('Bill not found')
+
+    const returnCheck = db.prepare(`SELECT COUNT(*) as cnt FROM sales_returns WHERE bill_number = ?`).get(bill.bill_number)
+    if (returnCheck && returnCheck.cnt > 0) {
+      throw new Error(`Cannot delete bill ${bill.bill_number} because a Sales Return already exists for it.`)
+    }
+
+    // If bill was NOT cancelled previously, restore stock and remove accounting entries
+    if (bill.status !== 'CANCELLED') {
+      const items = db.prepare(`SELECT * FROM bill_items WHERE bill_id = ?`).all(id)
+      for (const item of items) {
+        const isLoose = (item.sale_type && item.sale_type.toLowerCase() === 'loose') || !item.batch_id
+        if (!isLoose) {
+          if (item.medicine_id) {
+            db.prepare(`
+              UPDATE master.medicines SET stock_quantity = stock_quantity + ? WHERE id = ?
+            `).run(item.quantity, item.medicine_id)
+          }
+          if (item.batch_id) {
+            db.prepare(`
+              UPDATE master.stock_batches SET quantity = quantity + ? WHERE id = ?
+            `).run(item.quantity, item.batch_id)
+          }
+        }
+      }
+      db.prepare(`DELETE FROM transactions WHERE voucher_type = 'Sale' AND voucher_no = ?`).run(bill.bill_number)
+    }
+
+    // Remove bill items and bill record
+    db.prepare(`DELETE FROM bill_items WHERE bill_id = ?`).run(id)
+    db.prepare(`DELETE FROM bills WHERE id = ?`).run(id)
+
+    return { success: true, bill_number: bill.bill_number }
+  })
+
+  return deleteTx()
 }
 
 // ─── Purchase Orders ──────────────────────────────────────
@@ -1447,10 +1910,29 @@ function getPurchaseOrders() {
 // ─── Reports & Alerts ─────────────────────────────────────
 function getExpiryAlerts() {
   return getDB().prepare(`
-    SELECT * FROM master.medicines
-    WHERE expiry_date IS NOT NULL
-    AND expiry_date <= date('now', '+60 days')
-    ORDER BY expiry_date ASC
+    SELECT 
+      sb.quantity as stock_quantity,
+      sb.batch_no as batch_number,
+      printf('%04d-%02d-01', 
+        CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END, 
+        CAST(sb.expiry_month AS INTEGER)
+      ) as expiry_date,
+      m.name,
+      m.potency
+    FROM master.stock_batches sb
+    JOIN master.medicines m ON sb.medicine_id = m.id
+    WHERE 
+      sb.quantity > 0
+      AND sb.expiry_year IS NOT NULL AND sb.expiry_year != ''
+      AND sb.expiry_month IS NOT NULL AND sb.expiry_month != ''
+      AND date(printf('%04d-%02d-01', 
+        CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END, 
+        CAST(sb.expiry_month AS INTEGER)
+      )) <= date('now', '+60 days')
+    ORDER BY date(printf('%04d-%02d-01', 
+        CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END, 
+        CAST(sb.expiry_month AS INTEGER)
+    )) ASC
   `).all()
 }
 
@@ -1470,9 +1952,12 @@ function getExpiringBatches(days = 30) {
       sb.quantity > 0
       AND sb.expiry_year IS NOT NULL AND sb.expiry_year != ''
       AND sb.expiry_month IS NOT NULL AND sb.expiry_month != ''
-      AND date(printf('%04d-%02d-01', CAST(sb.expiry_year AS INTEGER), CAST(sb.expiry_month AS INTEGER))) <= date('now', '+' || ? || ' days')
+      AND date(printf('%04d-%02d-01', 
+        CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END, 
+        CAST(sb.expiry_month AS INTEGER)
+      )) <= date('now', '+' || ? || ' days')
     GROUP BY sb.id
-    ORDER BY CAST(sb.expiry_year AS INTEGER) ASC, CAST(sb.expiry_month AS INTEGER) ASC
+    ORDER BY CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END ASC, CAST(sb.expiry_month AS INTEGER) ASC
   `).all(days)
 }
 
@@ -1486,17 +1971,203 @@ function getSalesReport(range = '7') {
     FROM (
       SELECT date(created_at) as date, total_amount as revenue, (total_amount - discount) as net_revenue 
       FROM bills 
-      WHERE created_at >= date('now', '-' || ? || ' days')
+      WHERE (status IS NULL OR status != 'CANCELLED') AND created_at >= date('now', '-' || ? || ' days')
       
       UNION ALL
       
       SELECT date(created_at) as date, total_amount as revenue, net_amount as net_revenue 
       FROM wholesale_bills 
-      WHERE created_at >= date('now', '-' || ? || ' days')
+      WHERE (status IS NULL OR status != 'CANCELLED') AND created_at >= date('now', '-' || ? || ' days')
     )
     GROUP BY date
     ORDER BY date ASC
   `).all(range, range)
+}
+
+function getMonthlyItemSales(options = {}) {
+  const db = getDB();
+  const { targetMonth = null, showAll = false } = options || {};
+
+  // Determine reference month (YYYY-MM)
+  let refYearMonth = targetMonth;
+  if (!refYearMonth || !/^\d{4}-\d{2}$/.test(refYearMonth)) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    refYearMonth = `${y}-${m}`;
+  }
+
+  function calculateMonth(baseYm, offset) {
+    const [yStr, mStr] = baseYm.split('-');
+    let y = parseInt(yStr, 10);
+    let m = parseInt(mStr, 10) - 1; // 0-indexed
+    m -= offset;
+    while (m < 0) {
+      m += 12;
+      y -= 1;
+    }
+    const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const monthShort = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    return {
+      key,
+      name: monthNames[m],
+      shortName: monthShort[m],
+      year: y,
+      label: `${monthNames[m]} ${y}`,
+      shortLabel: `${monthShort[m]} ${y}`
+    };
+  }
+
+  const m0 = calculateMonth(refYearMonth, 0); // e.g., Oct 2026 (This Month)
+  const m1 = calculateMonth(refYearMonth, 1); // e.g., Sep 2026 (Previous Month)
+  const m2 = calculateMonth(refYearMonth, 2); // e.g., Aug 2026 (Month Before That)
+
+  let availableMonths = [];
+  try {
+    const distinctRows = db.prepare(`
+      SELECT DISTINCT substr(created_at, 1, 7) as ym
+      FROM (
+        SELECT created_at FROM bills WHERE created_at IS NOT NULL AND (status IS NULL OR status != 'CANCELLED')
+        UNION ALL
+        SELECT created_at FROM wholesale_bills WHERE created_at IS NOT NULL AND (status IS NULL OR status != 'CANCELLED')
+      )
+      WHERE ym IS NOT NULL AND ym != ''
+      ORDER BY ym DESC
+    `).all();
+    availableMonths = distinctRows.map(r => r.ym).filter(Boolean);
+  } catch (e) {
+    console.error('Error fetching distinct sale months:', e);
+  }
+
+  if (!availableMonths.includes(refYearMonth)) {
+    availableMonths.unshift(refYearMonth);
+  }
+
+  const m0Key = m0.key;
+  const m1Key = m1.key;
+  const m2Key = m2.key;
+
+  let sql;
+  let params;
+
+  if (showAll) {
+    sql = `
+      WITH all_sales AS (
+        SELECT bi.medicine_id, bi.quantity, b.created_at
+        FROM bill_items bi JOIN bills b ON bi.bill_id = b.id WHERE (b.status IS NULL OR b.status != 'CANCELLED')
+        UNION ALL
+        SELECT wbi.medicine_id, wbi.quantity, wb.created_at
+        FROM wholesale_bill_items wbi JOIN wholesale_bills wb ON wbi.wholesale_bill_id = wb.id WHERE (wb.status IS NULL OR wb.status != 'CANCELLED')
+        UNION ALL
+        SELECT sri.medicine_id, -sri.quantity, sr.created_at
+        FROM sales_return_items sri JOIN sales_returns sr ON sri.sales_return_id = sr.id
+        UNION ALL
+        SELECT wri.medicine_id, -wri.quantity, wr.created_at
+        FROM wholesale_return_items wri JOIN wholesale_returns wr ON wri.wholesale_return_id = wr.id
+      )
+      SELECT 
+        m.id,
+        m.name,
+        COALESCE(m.potency, '') as potency,
+        COALESCE(m.company, '') as company,
+        COALESCE(m.category, '') as category,
+        COALESCE(m.unit, '') as unit,
+        COALESCE(m.stock_quantity, 0) as current_stock,
+        COALESCE(m.low_stock_threshold, 10) as low_stock_threshold,
+        COALESCE(m.selling_price, 0) as selling_price,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) = ? THEN s.quantity ELSE 0 END), 0) as qty_m0,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) = ? THEN s.quantity ELSE 0 END), 0) as qty_m1,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) = ? THEN s.quantity ELSE 0 END), 0) as qty_m2,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) IN (?, ?, ?) THEN s.quantity ELSE 0 END), 0) as total_3m_qty,
+        MAX(s.created_at) as last_sold_at
+      FROM master.medicines m
+      LEFT JOIN all_sales s ON s.medicine_id = m.id AND substr(s.created_at, 1, 7) IN (?, ?, ?)
+      GROUP BY m.id
+      ORDER BY total_3m_qty DESC, m.name ASC
+    `;
+    params = [m0Key, m1Key, m2Key, m0Key, m1Key, m2Key, m0Key, m1Key, m2Key];
+  } else {
+    sql = `
+      WITH all_sales AS (
+        SELECT bi.medicine_id, bi.quantity, b.created_at
+        FROM bill_items bi JOIN bills b ON bi.bill_id = b.id WHERE (b.status IS NULL OR b.status != 'CANCELLED')
+        UNION ALL
+        SELECT wbi.medicine_id, wbi.quantity, wb.created_at
+        FROM wholesale_bill_items wbi JOIN wholesale_bills wb ON wbi.wholesale_bill_id = wb.id WHERE (wb.status IS NULL OR wb.status != 'CANCELLED')
+        UNION ALL
+        SELECT sri.medicine_id, -sri.quantity, sr.created_at
+        FROM sales_return_items sri JOIN sales_returns sr ON sri.sales_return_id = sr.id
+        UNION ALL
+        SELECT wri.medicine_id, -wri.quantity, wr.created_at
+        FROM wholesale_return_items wri JOIN wholesale_returns wr ON wri.wholesale_return_id = wr.id
+      )
+      SELECT 
+        m.id,
+        m.name,
+        COALESCE(m.potency, '') as potency,
+        COALESCE(m.company, '') as company,
+        COALESCE(m.category, '') as category,
+        COALESCE(m.unit, '') as unit,
+        COALESCE(m.stock_quantity, 0) as current_stock,
+        COALESCE(m.low_stock_threshold, 10) as low_stock_threshold,
+        COALESCE(m.selling_price, 0) as selling_price,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) = ? THEN s.quantity ELSE 0 END), 0) as qty_m0,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) = ? THEN s.quantity ELSE 0 END), 0) as qty_m1,
+        COALESCE(SUM(CASE WHEN substr(s.created_at, 1, 7) = ? THEN s.quantity ELSE 0 END), 0) as qty_m2,
+        COALESCE(SUM(s.quantity), 0) as total_3m_qty,
+        MAX(s.created_at) as last_sold_at
+      FROM all_sales s
+      JOIN master.medicines m ON s.medicine_id = m.id
+      WHERE substr(s.created_at, 1, 7) IN (?, ?, ?)
+      GROUP BY m.id
+      HAVING total_3m_qty > 0
+      ORDER BY total_3m_qty DESC, m.name ASC
+    `;
+    params = [m0Key, m1Key, m2Key, m0Key, m1Key, m2Key];
+  }
+
+  const items = db.prepare(sql).all(...params);
+
+  let totalQtyM0 = 0;
+  let totalQtyM1 = 0;
+  let totalQtyM2 = 0;
+  let grandTotalQty = 0;
+  const companiesSet = new Set();
+
+  for (const item of items) {
+    totalQtyM0 += item.qty_m0;
+    totalQtyM1 += item.qty_m1;
+    totalQtyM2 += item.qty_m2;
+    grandTotalQty += item.total_3m_qty;
+    if (item.company) {
+      companiesSet.add(item.company);
+    }
+  }
+
+  return {
+    months: {
+      m0: { ...m0, title: `This Month (${m0.shortLabel})` },
+      m1: { ...m1, title: `Previous Month (${m1.shortLabel})` },
+      m2: { ...m2, title: `Month Before (${m2.shortLabel})` }
+    },
+    availableMonths,
+    items,
+    totals: {
+      distinctItems: items.length,
+      totalQtyM0,
+      totalQtyM1,
+      totalQtyM2,
+      grandTotalQty
+    },
+    companies: Array.from(companiesSet).sort()
+  };
 }
 
 function getGstSalesRegisterPaginated({ fromDate, toDate, search = '', page = 1, limit = 50 }) {
@@ -1718,7 +2389,7 @@ function getDashboardStats() {
 
   const todaySales = db.prepare(`
     SELECT COUNT(*) as count, COALESCE(SUM(total_amount),0) as revenue
-    FROM bills WHERE date(created_at, 'localtime') = date('now', 'localtime')
+    FROM bills WHERE (status IS NULL OR status != 'CANCELLED') AND date(created_at, 'localtime') = date('now', 'localtime')
   `).get()
 
   const lowStock = db.prepare(`
@@ -1728,8 +2399,14 @@ function getDashboardStats() {
   `).get()
 
   const expiryAlerts = db.prepare(`
-    SELECT COUNT(*) as count FROM master.medicines
-    WHERE expiry_date IS NOT NULL AND expiry_date <= date('now', '+60 days')
+    SELECT COUNT(*) as count FROM master.stock_batches
+    WHERE quantity > 0
+      AND expiry_year IS NOT NULL AND expiry_year != ''
+      AND expiry_month IS NOT NULL AND expiry_month != ''
+      AND date(printf('%04d-%02d-01', 
+        CASE WHEN CAST(expiry_year AS INTEGER) < 100 THEN CAST(expiry_year AS INTEGER) + 2000 ELSE CAST(expiry_year AS INTEGER) END, 
+        CAST(expiry_month AS INTEGER)
+      )) <= date('now', '+60 days')
   `).get()
 
   const totalMedicines = db.prepare(`SELECT COUNT(*) as count FROM master.medicines`).get()
@@ -1737,7 +2414,9 @@ function getDashboardStats() {
   const topMedicines = db.prepare(`
     SELECT m.name, m.potency, m.company, SUM(bi.quantity) as total_qty
     FROM bill_items bi
+    JOIN bills b ON bi.bill_id = b.id
     JOIN master.medicines m ON bi.medicine_id = m.id
+    WHERE (b.status IS NULL OR b.status != 'CANCELLED')
     GROUP BY bi.medicine_id
     ORDER BY total_qty DESC
     LIMIT 5
@@ -1746,21 +2425,27 @@ function getDashboardStats() {
   const salesLast7Days = db.prepare(`
     SELECT date(created_at, 'localtime') as date, COALESCE(SUM(total_amount), 0) as revenue
     FROM bills 
-    WHERE date(created_at, 'localtime') >= date('now', 'localtime', '-6 days')
+    WHERE (status IS NULL OR status != 'CANCELLED') AND date(created_at, 'localtime') >= date('now', 'localtime', '-6 days')
     GROUP BY date(created_at, 'localtime')
     ORDER BY date(created_at, 'localtime') ASC
   `).all()
 
   const expiringNextMonth = db.prepare(`
     SELECT m.name, m.potency, sb.batch_no as batch_number, 
-           printf('%04d-%02d-01', CAST(sb.expiry_year AS INTEGER), CAST(sb.expiry_month AS INTEGER)) as expiry_date, 
+           printf('%04d-%02d-01', 
+             CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END, 
+             CAST(sb.expiry_month AS INTEGER)
+           ) as expiry_date, 
            sb.quantity as stock_quantity
     FROM master.stock_batches sb
     JOIN master.medicines m ON sb.medicine_id = m.id
     WHERE sb.quantity > 0 
       AND sb.expiry_year IS NOT NULL AND sb.expiry_year != ''
       AND sb.expiry_month IS NOT NULL AND sb.expiry_month != ''
-      AND date(printf('%04d-%02d-01', CAST(sb.expiry_year AS INTEGER), CAST(sb.expiry_month AS INTEGER))) <= date('now', '+30 days')
+      AND date(printf('%04d-%02d-01', 
+        CASE WHEN CAST(sb.expiry_year AS INTEGER) < 100 THEN CAST(sb.expiry_year AS INTEGER) + 2000 ELSE CAST(sb.expiry_year AS INTEGER) END, 
+        CAST(sb.expiry_month AS INTEGER)
+      )) <= date('now', '+30 days')
     ORDER BY CAST(sb.expiry_year AS INTEGER) ASC, CAST(sb.expiry_month AS INTEGER) ASC
   `).all()
 
@@ -1822,7 +2507,8 @@ function addStockBatch(data) {
       db.prepare(`UPDATE master.medicines SET selling_price = ? WHERE id = ?`).run(newSellingPrice, data.medicine_id)
     }
 
-    return result
+    const updatedStock = db.prepare(`SELECT stock_quantity FROM master.medicines WHERE id = ?`).get(data.medicine_id).stock_quantity
+    return { ...result, new_stock: updatedStock }
   })
   return insert()
 }
@@ -1847,6 +2533,18 @@ function getAllStockBatches() {
   `).all()
 }
 
+function getStockByLocation(data) {
+  const { godown, location_type, location_value } = data;
+  if (!location_value) return [];
+  return getDB().prepare(`
+    SELECT sb.*, m.name as medicine_name, m.category, m.potency, m.unit as packing
+    FROM master.stock_batches sb
+    JOIN master.medicines m ON sb.medicine_id = m.id
+    WHERE sb.godown = @godown AND sb.location_type = @location_type AND sb.location_value = @location_value
+    ORDER BY sb.created_at DESC
+  `).all({ godown: godown || 'G1', location_type: location_type || 'BOX', location_value });
+}
+
 function updateStockBatch(data) {
   const db = getDB()
   const update = db.transaction(() => {
@@ -1867,6 +2565,9 @@ function updateStockBatch(data) {
 
     // Sync: adjust the medicines.stock_quantity by the diff
     db.prepare(`UPDATE master.medicines SET stock_quantity = stock_quantity + ? WHERE id = ?`).run(diff, old.medicine_id)
+
+    const updatedStock = db.prepare(`SELECT stock_quantity FROM master.medicines WHERE id = ?`).get(old.medicine_id).stock_quantity
+    return { new_stock: updatedStock }
   })
   return update()
 }
@@ -1883,6 +2584,9 @@ function deleteStockBatch(id) {
 
     // Sync: decrement the medicines.stock_quantity
     db.prepare(`UPDATE master.medicines SET stock_quantity = stock_quantity - ? WHERE id = ?`).run(batch.quantity, batch.medicine_id)
+
+    const updatedStock = db.prepare(`SELECT stock_quantity FROM master.medicines WHERE id = ?`).get(batch.medicine_id).stock_quantity
+    return { new_stock: updatedStock, medicine_id: batch.medicine_id }
   })
   return remove()
 }
@@ -2029,6 +2733,9 @@ function getSalesBillForReturn(bill_number) {
   `).get(searchVal, `%/${searchVal}`, `%/${padded}`)
   
   if (!bill) return null
+  if (bill.status === 'CANCELLED') {
+    throw new Error(`Bill ${bill.bill_number} is CANCELLED. Returns cannot be created against a cancelled bill.`)
+  }
   const items = db.prepare(`
     SELECT bi.*, m.name as medicine_name, m.company, m.potency, m.unit,
            sb.batch_no, sb.expiry_month, sb.expiry_year, sb.godown, sb.location_value as rack
@@ -2171,7 +2878,7 @@ function createSalesReturn(data) {
       }
     }
     
-    // Ledger entry for Sales Return
+    // Ledger entry for Sales Return (Credit CASH)
     db.prepare(`
       INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
       VALUES (DATE('now', 'localtime'), @ledger_id, 'Sales Return', @return_number, @particulars, 0, @amount)
@@ -2181,6 +2888,15 @@ function createSalesReturn(data) {
       particulars: `Sales Return for Bill ${bill_number || 'N/A'} - ${reason || ''}`, 
       amount: total_amount 
     })
+
+    // Debit Sales Account (reduce sales)
+    let salesLedger = db.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'Sales Account'`).get()
+    if (salesLedger && total_amount > 0) {
+      db.prepare(`
+        INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
+        VALUES (DATE('now', 'localtime'), ?, 'Sales Return', ?, ?, ?, 0)
+      `).run(salesLedger.id, return_number, `Sales Return for Bill ${bill_number || 'N/A'} - ${reason || ''}`, total_amount)
+    }
     
     return returnId
   })
@@ -2215,7 +2931,7 @@ function createPurchaseReturn(data) {
       }
     }
     
-    // Ledger entry for Purchase Return
+    // 1. Debit Supplier
     db.prepare(`
       INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
       VALUES (DATE('now', 'localtime'), @ledger_id, 'Purchase Return', @return_number, @particulars, @amount, 0)
@@ -2225,6 +2941,15 @@ function createPurchaseReturn(data) {
       particulars: `Purchase Return for Inv ${invoice_number || 'N/A'} - ${reason || ''}`, 
       amount: total_amount 
     })
+
+    // 2. Credit Purchase Account (reduce purchases)
+    let purchaseLedger = db.prepare(`SELECT id FROM ledgers WHERE ledger_name = 'Purchase Account'`).get()
+    if (purchaseLedger && total_amount > 0) {
+      db.prepare(`
+        INSERT INTO transactions (date, ledger_id, voucher_type, voucher_no, particulars, dr_amount, cr_amount)
+        VALUES (DATE('now', 'localtime'), ?, 'Purchase Return', ?, ?, 0, ?)
+      `).run(purchaseLedger.id, return_number, `Purchase Return for Inv ${invoice_number || 'N/A'} - ${reason || ''}`, total_amount)
+    }
     
     return returnId
   })
@@ -2271,6 +2996,9 @@ function getWholesaleBillForReturn(bill_number) {
   `).get(searchVal, `%/${searchVal}`, `%/${padded}`)
   
   if (!bill) return null
+  if (bill.status === 'CANCELLED') {
+    throw new Error(`Wholesale Bill ${bill.bill_number} is CANCELLED. Returns cannot be created against a cancelled bill.`)
+  }
   const items = db.prepare(`
     SELECT bi.*, m.name as medicine_name, m.company, m.potency, m.unit,
            sb.batch_no, sb.expiry_month, sb.expiry_year, sb.godown, sb.location_value as rack
@@ -2371,11 +3099,12 @@ function setSetting(key, value) {
   return true
 }
 
-function getProfitLossData() {
+function getProfitLossData(fromDate, toDate) {
   const db = getDB()
   
-  const ledgers = db.prepare(`
+  let query = `
     SELECT 
+      l.id,
       l.account_group,
       l.ledger_name,
       l.opening_balance,
@@ -2384,51 +3113,112 @@ function getProfitLossData() {
       IFNULL(SUM(t.cr_amount), 0) as total_cr
     FROM ledgers l
     LEFT JOIN transactions t ON l.id = t.ledger_id
-    GROUP BY l.id
-  `).all()
+  `
+  const params = []
+  const conditions = []
+  if (fromDate) {
+    conditions.push(`date(t.date) >= date(?)`)
+    params.push(fromDate)
+  }
+  if (toDate) {
+    conditions.push(`date(t.date) <= date(?)`)
+    params.push(toDate)
+  }
+
+  if (conditions.length > 0) {
+    query += ` AND ${conditions.join(' AND ')}`
+  }
+  query += ` GROUP BY l.id`
+
+  const ledgers = db.prepare(query).all(...params)
 
   let data = {
     openingStock: 0,
     purchases: 0,
+    purchaseAccounts: [],
     directExpenses: [],
     sales: 0,
+    salesAccounts: [],
     indirectExpenses: [],
     indirectIncomes: [],
     closingStock: 0,
     grossProfit: 0,
-    netProfit: 0
+    netProfit: 0,
+    fromDate: fromDate || null,
+    toDate: toDate || null
   }
 
+  // Check opening stock from settings if configured
+  try {
+    const openingStockSetting = db.prepare(`SELECT value FROM master.settings WHERE key = 'opening_stock'`).get()
+    if (openingStockSetting && !isNaN(parseFloat(openingStockSetting.value))) {
+      data.openingStock = parseFloat(openingStockSetting.value)
+    }
+  } catch (e) {
+    // ignore if table doesn't have it
+  }
+
+  const isFullYearOrNoDate = !fromDate || fromDate.endsWith('-04-01')
+
   for (const l of ledgers) {
-    let openingDr = l.dr_cr === 'Dr' ? l.opening_balance : 0;
-    let openingCr = l.dr_cr === 'Cr' ? l.opening_balance : 0;
-    let netDebit = (openingDr - openingCr) + (l.total_dr - l.total_cr);
+    let openingDr = (isFullYearOrNoDate && l.dr_cr === 'Dr') ? (l.opening_balance || 0) : 0
+    let openingCr = (isFullYearOrNoDate && l.dr_cr === 'Cr') ? (l.opening_balance || 0) : 0
+    let netDebit = (openingDr - openingCr) + (l.total_dr - l.total_cr)
     
-    let group = l.account_group ? l.account_group.toUpperCase() : '';
+    let group = l.account_group ? l.account_group.toUpperCase() : ''
     
     if (group === 'PURCHASE ACCOUNTS') {
-      data.purchases += netDebit;
+      data.purchases += netDebit
+      data.purchaseAccounts.push({ id: l.id, name: l.ledger_name, amount: netDebit, dr: l.total_dr, cr: l.total_cr })
     } else if (group === 'DIRECT EXPENSES') {
-      data.directExpenses.push({ name: l.ledger_name, amount: netDebit });
+      data.directExpenses.push({ id: l.id, name: l.ledger_name, amount: netDebit, dr: l.total_dr, cr: l.total_cr })
     } else if (group === 'SALES ACCOUNTS') {
-      data.sales += -netDebit; // Credit balance
+      data.sales += -netDebit // Credit balance
+      data.salesAccounts.push({ id: l.id, name: l.ledger_name, amount: -netDebit, dr: l.total_dr, cr: l.total_cr })
     } else if (group === 'INDIRECT EXPENSES') {
-      data.indirectExpenses.push({ name: l.ledger_name, amount: netDebit });
+      data.indirectExpenses.push({ id: l.id, name: l.ledger_name, amount: netDebit, dr: l.total_dr, cr: l.total_cr })
     } else if (group === 'INDIRECT INCOMES' || group === 'DIRECT INCOMES') {
-      data.indirectIncomes.push({ name: l.ledger_name, amount: -netDebit }); // Credit balance
+      data.indirectIncomes.push({ id: l.id, name: l.ledger_name, amount: -netDebit, dr: l.total_dr, cr: l.total_cr }) // Credit balance
     }
   }
 
-  const stockInfo = db.prepare(`SELECT SUM(stock_quantity * purchase_price) as total_val FROM master.medicines WHERE stock_quantity > 0`).get()
-  data.closingStock = stockInfo?.total_val || 0;
+  // Defensively merge nominal accounts by normalized name to prevent duplicate rows in P&L
+  const mergeNominalAccounts = (list) => {
+    const map = new Map()
+    for (const item of list) {
+      const key = (item.name || '').trim().toUpperCase()
+      if (!map.has(key)) {
+        map.set(key, { ...item, name: (item.name || '').trim() })
+      } else {
+        const existing = map.get(key)
+        existing.amount = Number((existing.amount + item.amount).toFixed(2))
+        existing.dr = Number(((existing.dr || 0) + (item.dr || 0)).toFixed(2))
+        existing.cr = Number(((existing.cr || 0) + (item.cr || 0)).toFixed(2))
+      }
+    }
+    return Array.from(map.values())
+  }
+
+  data.purchaseAccounts = mergeNominalAccounts(data.purchaseAccounts)
+  data.directExpenses = mergeNominalAccounts(data.directExpenses)
+  data.salesAccounts = mergeNominalAccounts(data.salesAccounts)
+  data.indirectExpenses = mergeNominalAccounts(data.indirectExpenses)
+  data.indirectIncomes = mergeNominalAccounts(data.indirectIncomes)
+
+  try {
+    const stockInfo = db.prepare(`SELECT SUM(stock_quantity * purchase_price) as total_val FROM master.medicines WHERE stock_quantity > 0`).get()
+    data.closingStock = stockInfo?.total_val || 0
+  } catch (e) {
+    data.closingStock = 0
+  }
   
   // Calculate Profits
-  const totalDirectExpenses = data.directExpenses.reduce((sum, e) => sum + e.amount, 0);
-  data.grossProfit = (data.sales + data.closingStock) - (data.openingStock + data.purchases + totalDirectExpenses);
+  const totalDirectExpenses = data.directExpenses.reduce((sum, e) => sum + e.amount, 0)
+  data.grossProfit = (data.sales + data.closingStock) - (data.openingStock + data.purchases + totalDirectExpenses)
   
-  const totalIndirectExpenses = data.indirectExpenses.reduce((sum, e) => sum + e.amount, 0);
-  const totalIndirectIncomes = data.indirectIncomes.reduce((sum, e) => sum + e.amount, 0);
-  data.netProfit = data.grossProfit + totalIndirectIncomes - totalIndirectExpenses;
+  const totalIndirectExpenses = data.indirectExpenses.reduce((sum, e) => sum + e.amount, 0)
+  const totalIndirectIncomes = data.indirectIncomes.reduce((sum, e) => sum + e.amount, 0)
+  data.netProfit = data.grossProfit + totalIndirectIncomes - totalIndirectExpenses
 
   return data
 }
@@ -2506,7 +3296,7 @@ function getGstReturnsData(fromDate, toDate) {
       bi.gst_rate
     FROM bill_items bi
     JOIN bills b ON bi.bill_id = b.id
-    WHERE 1=1
+    WHERE (b.status IS NULL OR b.status != 'CANCELLED')
   `
   let salesReturnQuery = `
     SELECT 
@@ -2544,7 +3334,7 @@ function getGstReturnsData(fromDate, toDate) {
     FROM wholesale_bill_items wbi
     JOIN wholesale_bills wb ON wbi.wholesale_bill_id = wb.id
     LEFT JOIN ledgers l ON wb.ledger_id = l.id
-    WHERE 1=1
+    WHERE (wb.status IS NULL OR wb.status != 'CANCELLED')
   `
 
   const params = []
@@ -2813,6 +3603,71 @@ function updateWholesaleBill(billData) {
   return updateTx()
 }
 
+function cancelWholesaleBill({ id, reason }) {
+  if (isCurrentYearLocked()) {
+    throw new Error('This financial year is locked. Bills cannot be cancelled.')
+  }
+  const db = getDB()
+
+  const cancelTx = db.transaction(() => {
+    const bill = db.prepare(`SELECT * FROM wholesale_bills WHERE id = ?`).get(id)
+    if (!bill) throw new Error('Wholesale bill not found')
+    if (bill.status === 'CANCELLED') {
+      throw new Error(`Wholesale bill ${bill.bill_number} is already cancelled.`)
+    }
+
+    // Check if wholesale return exists for this bill
+    const returnCheck = db.prepare(`SELECT COUNT(*) as cnt FROM wholesale_returns WHERE bill_number = ?`).get(bill.bill_number)
+    if (returnCheck && returnCheck.cnt > 0) {
+      throw new Error(`Cannot cancel bill ${bill.bill_number} because a Wholesale Return already exists for it. Please delete the Wholesale Return first.`)
+    }
+
+    // 1. Delete accounting transactions (Debit Customer & Credit Sales Account)
+    db.prepare(`DELETE FROM transactions WHERE voucher_type = 'Sales' AND voucher_no = ?`).run(bill.bill_number)
+
+    // 2. Mark wholesale bill as CANCELLED
+    db.prepare(`
+      UPDATE wholesale_bills SET 
+        status = 'CANCELLED',
+        cancellation_reason = ?,
+        cancelled_at = datetime('now', 'localtime')
+      WHERE id = ?
+    `).run(reason || 'Cancelled by user', id)
+
+    return { success: true, bill_number: bill.bill_number }
+  })
+
+  return cancelTx()
+}
+
+function deleteWholesaleBill(id) {
+  if (isCurrentYearLocked()) {
+    throw new Error('This financial year is locked. Bills cannot be deleted.')
+  }
+  const db = getDB()
+
+  const deleteTx = db.transaction(() => {
+    const bill = db.prepare(`SELECT * FROM wholesale_bills WHERE id = ?`).get(id)
+    if (!bill) throw new Error('Wholesale bill not found')
+
+    const returnCheck = db.prepare(`SELECT COUNT(*) as cnt FROM wholesale_returns WHERE bill_number = ?`).get(bill.bill_number)
+    if (returnCheck && returnCheck.cnt > 0) {
+      throw new Error(`Cannot delete bill ${bill.bill_number} because a Wholesale Return already exists for it.`)
+    }
+
+    if (bill.status !== 'CANCELLED') {
+      db.prepare(`DELETE FROM transactions WHERE voucher_type = 'Sales' AND voucher_no = ?`).run(bill.bill_number)
+    }
+
+    db.prepare(`DELETE FROM wholesale_bill_items WHERE wholesale_bill_id = ?`).run(id)
+    db.prepare(`DELETE FROM wholesale_bills WHERE id = ?`).run(id)
+
+    return { success: true, bill_number: bill.bill_number }
+  })
+
+  return deleteTx()
+}
+
 function searchWholesaleBillsPaginated({ search = '', page = 1, limit = 50 }) {
   const db = getDB()
   const offset = (page - 1) * limit
@@ -2964,7 +3819,7 @@ function getItemLedger(medicine_id) {
         bi.quantity as qty_out
       FROM bill_items bi
       JOIN bills b ON bi.bill_id = b.id
-      WHERE bi.medicine_id = ?
+      WHERE bi.medicine_id = ? AND (b.status IS NULL OR b.status != 'CANCELLED')
 
       UNION ALL
 
@@ -3138,7 +3993,31 @@ function getGstPurchaseRegisterPaginated({ fromDate, toDate, search = '', page =
   return { totals, invoices, total: totalInvoices, page, limit };
 }
 
+function getRecentExpenses() {
+  const database = getDB();
+  return database.prepare(`
+    SELECT 
+      t1.id,
+      t1.date,
+      t1.voucher_no,
+      t1.particulars,
+      t1.dr_amount as amount,
+      l1.ledger_name as expense_category,
+      l2.ledger_name as paid_from
+    FROM transactions t1
+    JOIN ledgers l1 ON t1.ledger_id = l1.id
+    JOIN transactions t2 ON t1.voucher_no = t2.voucher_no AND t2.cr_amount > 0
+    JOIN ledgers l2 ON t2.ledger_id = l2.id
+    WHERE l1.account_group IN ('DIRECT EXPENSES', 'INDIRECT EXPENSES')
+      AND t1.dr_amount > 0
+      AND t1.voucher_type = 'Payment'
+    ORDER BY t1.date DESC, t1.id DESC
+    LIMIT 100
+  `).all();
+}
+
 module.exports = {
+  getRecentExpenses,
 
   getItemLedger,
   getDB,
@@ -3158,16 +4037,16 @@ module.exports = {
   getPowers, addPower, updatePower, deletePower,
   getPackings, addPacking, updatePacking, deletePacking,
   getAccountGroups, addAccountGroup, deleteAccountGroup,
-  createBill, getBills, getBillById, searchRetailBillsPaginated,
+  createBill, updateBill, cancelRetailBill, deleteRetailBill, getBills, getBillById, searchRetailBillsPaginated,
   createPurchaseBill, getPurchaseBills, getPurchaseBillById,
-  updateWholesaleBill,
+  updateWholesaleBill, cancelWholesaleBill, deleteWholesaleBill,
   createWholesaleBill, searchWholesaleBillsPaginated, getWholesaleBills, getWholesaleBillById, getNextWholesaleBillNumber,
   createPurchaseOrder, getPurchaseOrders,
-  getSalesReport, getGstSalesRegisterPaginated, getGstPurchaseRegisterPaginated, getExpiryAlerts, getExpiringBatches,
+  getSalesReport, getMonthlyItemSales, getGstSalesRegisterPaginated, getGstPurchaseRegisterPaginated, getExpiryAlerts, getExpiringBatches,
   getDashboardStats,
   getFinancialYears, selectFinancialYear, createFinancialYear,
   getGodowns, addGodown, deleteGodown,
-  addStockBatch, getStockBatches, getAllStockBatches, updateStockBatch, deleteStockBatch,
+  addStockBatch, getStockBatches, getAllStockBatches, getStockByLocation, updateStockBatch, deleteStockBatch,
   resetAllStock, getStoreProfile, updateStoreProfile, verifyAdminPin, updateAdminPin,
   verifyCashierPin, updateCashierPin,
   getSalesReturns, getPurchaseReturns, getBalanceSheetData, getProfitLossData, getGstReturnsData, getDayBook,

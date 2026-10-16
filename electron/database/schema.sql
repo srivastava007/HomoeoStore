@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS bills (
   total_amount REAL DEFAULT 0,
   discount REAL DEFAULT 0,
   paid_amount REAL DEFAULT 0,
+  status TEXT DEFAULT 'ACTIVE',
+  cancellation_reason TEXT,
+  cancelled_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -303,6 +306,9 @@ CREATE TABLE IF NOT EXISTS wholesale_bills (
   total_discount REAL DEFAULT 0,
   round_off REAL DEFAULT 0,
   net_amount REAL DEFAULT 0,
+  status TEXT DEFAULT 'ACTIVE',
+  cancellation_reason TEXT,
+  cancelled_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (ledger_id) REFERENCES ledgers(id)
 );

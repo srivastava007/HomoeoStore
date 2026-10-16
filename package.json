@@ -7,6 +7,7 @@
     "dev": "cross-env NODE_ENV=development concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build",
     "start": "electron .",
+    "test:e2e": "npm run build && cross-env NODE_ENV=test playwright test",
     "dist": "vite build && electron-builder --win"
   },
   "dependencies": {
@@ -59,7 +60,8 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "electron/installer.nsh"
     }
   }
 }

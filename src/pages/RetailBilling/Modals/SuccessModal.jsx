@@ -4,6 +4,7 @@ export default function SuccessModal({
     show, 
     billNo, 
     billId, 
+    isEdit = false,
     successFocus, 
     setSuccessFocus, 
     onClose, 
@@ -29,14 +30,19 @@ export default function SuccessModal({
                 boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)'
             }}>
                 <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-                    <div style={{ width: '48px', height: '48px', background: '#dcfce7', color: '#16a34a', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
-                        <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"></path></svg>
+                    <div style={{ width: '48px', height: '48px', background: isEdit ? '#fef3c7' : '#dcfce7', color: isEdit ? '#d97706' : '#16a34a', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
+                        {isEdit ? (
+                            <span style={{ fontSize: '24px' }}>✏️</span>
+                        ) : (
+                            <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"></path></svg>
+                        )}
                     </div>
-                    <h3 style={{ margin: 0, color: '#0f2d1f', fontSize: '18px' }}>Bill Created!</h3>
+                    <h3 style={{ margin: 0, color: '#0f2d1f', fontSize: '18px' }}>{isEdit ? 'Bill Updated!' : 'Bill Created!'}</h3>
                     <p style={{ margin: '8px 0 0', color: '#64748b', fontSize: '14px' }}>Bill No: <strong>{billNo}</strong></p>
                 </div>
                 <div style={{ display: 'flex', gap: '12px' }}>
                     <button 
+                        id="billing-print-btn"
                         onClick={() => onPrint(billId)}
                         onMouseEnter={() => setSuccessFocus('print')}
                         style={{
@@ -56,6 +62,7 @@ export default function SuccessModal({
                         Print
                     </button>
                     <button 
+                        id="billing-ok-btn"
                         onClick={onClose}
                         onMouseEnter={() => setSuccessFocus('ok')}
                         style={{
